@@ -1,0 +1,22 @@
+[package]
+name = "nuvio-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+nuvio-core = { path = "../../crates/nuvio-core" }
+tauri = { version = "2.12", features = [] }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+url.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rand.workspace = true
+libloading.workspace = true
+raw-window-handle = "0.6"

@@ -1,0 +1,9 @@
+/target
+/dist/*.AppImage
+/dist/*.exe
+/dist/*.zip
+**/*.rs.bk
+*.sqlite3
+*.redb
+.DS_Store
+Thumbs.db

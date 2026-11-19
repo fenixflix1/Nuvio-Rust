@@ -1,0 +1,67 @@
+name: Build Nuvio Desktop (Rust)
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libmpv-dev libx11-dev libxtst-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release -p nuvio-desktop
+      - name: Package AppImage
+        run: |
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
+          cp target/release/nuvio-desktop AppDir/usr/bin/nuvio-desktop
+          cp apps/nuvio-desktop/icons/icon.png AppDir/nuvio-desktop.png
+          cp apps/nuvio-desktop/icons/icon.png AppDir/usr/share/icons/hicolor/256x256/apps/nuvio-desktop.png
+          cat > AppDir/nuvio-desktop.desktop <<'EOF'
+          [Desktop Entry]
+          Name=Nuvio Desktop
+          Exec=nuvio-desktop
+          Icon=nuvio-desktop
+          Type=Application
+          Categories=AudioVideo;Video;Player;
+          EOF
+          cp AppDir/nuvio-desktop.desktop AppDir/usr/share/applications/nuvio-desktop.desktop
+          cat > AppDir/AppRun <<'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          exec "$HERE/usr/bin/nuvio-desktop" "$@"
+          EOF
+          chmod +x AppDir/AppRun AppDir/usr/bin/nuvio-desktop
+          curl -fsSL https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -o /tmp/appimagetool
+          chmod +x /tmp/appimagetool
+          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 /tmp/appimagetool AppDir NuvioDesktop-Rust-x86_64.AppImage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NuvioDesktop-Rust-Linux-AppImage
+          path: NuvioDesktop-Rust-x86_64.AppImage
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Windows release executable
+        run: cargo build --release -p nuvio-desktop
+      - name: Prepare Windows artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist-win | Out-Null
+          Copy-Item target/release/nuvio-desktop.exe dist-win/NuvioDesktop-Rust.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NuvioDesktop-Rust-Windows-Exe
+          path: dist-win/NuvioDesktop-Rust.exe

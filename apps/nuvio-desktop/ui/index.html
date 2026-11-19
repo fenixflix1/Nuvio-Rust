@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Nuvio</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body data-theme="white">
+
+  <!-- 1. AUTH SCREEN (1:1 AuthScreen.kt AuthLargeLayout) -->
+  <div id="view-auth" class="view">
+    <div class="auth-shell">
+      <div class="auth-brand-pane">
+        <img src="assets/app_logo_wordmark.png" alt="Nuvio" class="auth-wordmark" />
+        <h1 class="auth-tagline">Assista sua biblioteca em qualquer lugar</h1>
+        <p class="auth-tagline-sub">Entre para sincronizar perfis, addons e progresso entre dispositivos</p>
+      </div>
+
+      <div class="auth-form-pane">
+        <div class="auth-server-bar">
+          <span class="server-pill" id="auth-server-pill">api.nuvio.tv</span>
+          <div class="menu-wrap">
+            <button class="icon-btn" id="btn-server-menu" title="Opções de servidor">&#8942;</button>
+            <div class="dropdown-menu hidden" id="server-menu-dropdown">
+              <button id="btn-use-official-server">Usar servidor oficial (api.nuvio.tv)</button>
+              <button id="btn-open-custom-server">Conectar a servidor customizado…</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="auth-form-box">
+          <h2 id="auth-heading">Bem-vindo de volta</h2>
+          <p class="auth-subtitle" id="auth-subtitle">Entre para acessar sua biblioteca e seu histórico</p>
+
+          <div class="auth-field">
+            <svg viewBox="0 0 24 24" class="field-icon"><path fill="currentColor" d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2m0 4l-8 5l-8-5V6l8 5l8-5z"/></svg>
+            <input type="email" id="auth-email" placeholder="E-mail" autocomplete="email" />
+          </div>
+
+          <div class="auth-field">
+            <svg viewBox="0 0 24 24" class="field-icon"><path fill="currentColor" d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2m-6 9c-1.1 0-2-.9-2-2s.9-2 2-2s2 .9 2 2s-.9 2-2 2m3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1s3.1 1.39 3.1 3.1z"/></svg>
+            <input type="password" id="auth-password" placeholder="Senha" autocomplete="current-password" />
+            <button type="button" class="eye-btn" id="btn-toggle-pass" title="Mostrar/ocultar senha">
+              <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5M12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5s5 2.24 5 5s-2.24 5-5 5m0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3s3-1.34 3-3s-1.34-3-3-3"/></svg>
+            </button>
+          </div>
+
+          <div class="auth-error hidden" id="auth-error"></div>
+
+          <button class="auth-primary-btn" id="btn-auth-submit">Entrar</button>
+
+          <div class="auth-toggle-row">
+            <span id="auth-toggle-prompt">Não tem uma conta?</span>
+            <button class="link-btn" id="btn-auth-toggle-mode">Criar conta</button>
+          </div>
+
+          <div class="auth-divider"><span>ou</span></div>
+
+          <div id="device-link-area">
+            <button class="auth-secondary-btn" id="btn-device-link">Entrar com Código (Link)</button>
+          </div>
+
+          <div class="device-link-box hidden" id="device-link-waiting">
+            <div class="device-link-code" id="device-link-code">------</div>
+            <div class="device-link-hint">
+              Acesse <a href="#" id="device-link-url" target="_blank" rel="noreferrer">nuvio.tv/link</a> e digite este código.
+            </div>
+            <div class="device-link-status" id="device-link-status">Aguardando aprovação…</div>
+            <button class="link-btn" id="btn-device-link-cancel">Cancelar</button>
+          </div>
+
+          <button class="auth-guest-btn" id="btn-auth-guest">
+            Continuar sem conta
+            <span>Seus dados ficarão salvos apenas neste computador</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. PROFILE SELECTION SCREEN -->
+  <div id="view-profiles" class="view">
+    <div class="profiles-shell">
+      <img src="assets/app_logo_wordmark.png" alt="Nuvio" class="profiles-wordmark" />
+      <h1 class="profiles-heading">Quem está assistindo?</h1>
+      <div class="profiles-grid" id="profiles-grid"></div>
+      <div class="profiles-actions">
+        <button class="btn-ghost" id="btn-profiles-signout">Sair da conta</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. MAIN DESKTOP SHELL -->
+  <div id="view-app" class="view">
+    <div class="desktop-shell" id="desktop-shell">
+      <!-- FLOATING TOP GLASS NAV BAR (DesktopNavigationBar.kt alternative) -->
+      <header class="desktop-topnav hidden" id="desktop-topnav">
+        <div class="topnav-brand">
+          <img src="assets/app_logo_wordmark.png" alt="Nuvio" class="topnav-logo" />
+        </div>
+        <nav class="topnav-pill">
+          <button class="topnav-item active" data-tab="home">Início</button>
+          <button class="topnav-item" data-tab="search">Buscar</button>
+          <button class="topnav-item" data-tab="library">Biblioteca</button>
+          <button class="topnav-item" data-tab="settings">Ajustes</button>
+        </nav>
+        <button class="topnav-profile-btn" id="btn-topnav-profile" title="Trocar perfil">
+          <div class="mini-avatar" id="topnav-avatar">N</div>
+          <span id="topnav-profile-name">Perfil</span>
+        </button>
+      </header>
+
+      <!-- COLLAPSING SIDEBAR (AppShellComponents.kt DesktopSidebar) -->
+      <aside class="desktop-sidebar" id="desktop-sidebar">
+        <button class="sidebar-profile-trigger" id="btn-sidebar-profile" title="Alternar perfil">
+          <div class="sidebar-icon-slot">
+            <div class="mini-avatar" id="sidebar-avatar">N</div>
+          </div>
+          <span class="sidebar-label" id="sidebar-profile-name">Perfil</span>
+        </button>
+
+        <div class="profile-switcher-stack hidden" id="profile-switcher-stack"></div>
+
+        <nav class="sidebar-nav">
+          <button class="sidebar-item active" data-tab="home">
+            <div class="sidebar-icon-slot">
+              <svg viewBox="0 0 24 24" class="nav-svg"><path fill="currentColor" d="M10 20v-6h4v6h5v-8h3L12 3L2 12h3v8z"/></svg>
+            </div>
+            <span class="sidebar-label">Início</span>
+          </button>
+          <button class="sidebar-item" data-tab="search">
+            <div class="sidebar-icon-slot">
+              <svg viewBox="0 0 24 24" class="nav-svg"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5A6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5S14 7.01 14 9.5S11.99 14 9.5 14"/></svg>
+            </div>
+            <span class="sidebar-label">Buscar</span>
+          </button>
+          <button class="sidebar-item" data-tab="library">
+            <div class="sidebar-icon-slot">
+              <svg viewBox="0 0 24 24" class="nav-svg"><path fill="currentColor" d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2m-1 9H9V9h10zm-4 4H9v-2h6zm4-8H9V5h10z"/></svg>
+            </div>
+            <span class="sidebar-label">Biblioteca</span>
+          </button>
+          <button class="sidebar-item" data-tab="settings">
+            <div class="sidebar-icon-slot">
+              <svg viewBox="0 0 24 24" class="nav-svg"><path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94c0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6s3.6 1.62 3.6 3.6s-1.62 3.6-3.6 3.6"/></svg>
+            </div>
+            <span class="sidebar-label">Ajustes</span>
+          </button>
+        </nav>
+      </aside>
+
+      <main class="main-viewport" id="main-viewport">
+        <!-- HOME TAB -->
+        <section class="tab-panel active" id="tab-home">
+          <div id="home-hero-container"></div>
+          <div id="home-cw-container" class="home-cw-wrap hidden"></div>
+          <div id="home-catalogs-container" class="home-shelves"></div>
+        </section>
+
+        <!-- FULL CATALOG TAB -->
+        <section class="tab-panel padded-page" id="tab-catalog">
+          <div class="catalog-top-bar">
+            <button class="circle-back-btn" id="btn-catalog-back" title="Voltar">
+              <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M15.41 7.41L14 6l-6 6l6 6l1.41-1.41L10.83 12z"/></svg>
+            </button>
+            <div>
+              <h2 id="catalog-page-title" style="margin:0;">Catálogo</h2>
+              <p class="muted" id="catalog-page-sub"></p>
+            </div>
+          </div>
+          <div class="poster-grid" id="catalog-full-grid"></div>
+          <div class="catalog-load-more-wrap">
+            <button class="btn-ghost hidden" id="btn-catalog-load-more">Carregar mais</button>
+            <span class="status-text" id="catalog-full-status"></span>
+          </div>
+        </section>
+
+        <!-- FULL-SCREEN META DETAILS SCREEN (MetaDetailsScreen.kt + DesktopDetailHero.kt) -->
+        <section class="tab-panel" id="tab-details">
+          <div id="detail-hero-wrapper"></div>
+          <div id="detail-body-wrapper" class="detail-body-section"></div>
+        </section>
+
+        <!-- FULL-SCREEN STREAMS SCREEN (StreamsTabletLayout.kt) -->
+        <section class="tab-panel" id="tab-streams">
+          <div class="streams-screen-root" id="streams-screen-root">
+            <div class="streams-bg-image" id="streams-bg-image"></div>
+            <div class="streams-bg-scrim"></div>
+            <div class="streams-split-layout">
+              <div class="streams-left-pane">
+                <button class="circle-back-btn" id="btn-streams-back" title="Voltar">
+                  <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M15.41 7.41L14 6l-6 6l6 6l1.41-1.41L10.83 12z"/></svg>
+                </button>
+                <div class="streams-meta-summary" id="streams-meta-summary"></div>
+              </div>
+              <div class="streams-right-pane">
+                <div class="streams-resume-banner hidden" id="streams-resume-banner"></div>
+                <div class="streams-filter-row" id="streams-filter-row"></div>
+                <div class="streams-active-scrapers hidden" id="streams-active-scrapers"></div>
+                <div class="streams-status-bar" id="streams-status-bar">Buscando nos addons…</div>
+                <div class="streams-cards-list" id="streams-cards-list"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- SEARCH & DISCOVER TAB (SearchScreen.kt, 100% Addons) -->
+        <section class="tab-panel padded-page" id="tab-search">
+          <div class="search-bar-wrap">
+            <svg viewBox="0 0 24 24" class="search-icon"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5A6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5S14 7.01 14 9.5S11.99 14 9.5 14"/></svg>
+            <input type="text" id="search-input" placeholder="Pesquisar filmes e séries nos seus addons…" />
+            <button class="btn-ghost hidden" id="btn-search-clear" title="Limpar busca">✕</button>
+            <button class="btn-accent" id="btn-search">Buscar</button>
+          </div>
+          <div class="recent-searches-wrap hidden" id="recent-searches-wrap"></div>
+          <div class="status-text" id="search-status"></div>
+          <div class="search-shelves-wrap" id="search-results"></div>
+
+          <div id="discover-section" class="discover-section">
+            <div class="discover-header">
+              <h2>Descobrir</h2>
+              <span class="muted" id="discover-context-label"></span>
+            </div>
+            <div class="discover-filters-bar">
+              <div class="season-pills" id="discover-type-pills" style="margin-bottom:0;"></div>
+              <select id="discover-catalog-select" class="nuvio-chip-select"></select>
+              <select id="discover-genre-select" class="nuvio-chip-select hidden"></select>
+            </div>
+            <div class="poster-grid" id="discover-grid" style="margin-top:16px;"></div>
+            <div class="catalog-load-more-wrap">
+              <button class="btn-ghost hidden" id="btn-discover-load-more">Carregar mais</button>
+              <span class="status-text" id="discover-status"></span>
+            </div>
+          </div>
+        </section>
+
+        <!-- LIBRARY TAB (LibraryScreen.kt) -->
+        <section class="tab-panel padded-page" id="tab-library">
+          <div class="library-top-header">
+            <div>
+              <h2 style="margin:0;">Biblioteca</h2>
+              <p class="muted" id="library-status">Seus títulos salvos</p>
+            </div>
+            <div class="row-gap">
+              <button class="addon-icon-btn" id="btn-library-layout" title="Alternar Grade / Lista">
+                <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M3 3v8h8V3zm6 6H5V5h4zm-6 4v8h8v-8zm6 6H5v-4h4zm4-16v8h8V3zm6 6h-4V5h4zm-6 4v8h8v-8zm6 6h-4v-4h4z"/></svg>
+              </button>
+              <button class="btn-ghost" id="btn-refresh-library">↻ Sincronizar</button>
+            </div>
+          </div>
+
+          <div class="library-controls-row">
+            <input type="text" id="library-filter-q" placeholder="Filtrar biblioteca…" style="max-width:240px;" />
+            <select id="library-filter-type" class="nuvio-chip-select">
+              <option value="all">Tipo: Todos</option>
+              <option value="movie">Filmes</option>
+              <option value="series">Séries</option>
+            </select>
+            <select id="library-filter-watched" class="nuvio-chip-select">
+              <option value="all">Status: Todos</option>
+              <option value="watched">Assistidos</option>
+              <option value="unwatched">Não assistidos</option>
+            </select>
+            <select id="library-sort" class="nuvio-chip-select">
+              <option value="recent">Ordenar: Recentes</option>
+              <option value="title">Ordenar: Título (A–Z)</option>
+              <option value="year">Ordenar: Ano</option>
+            </select>
+          </div>
+
+          <div class="poster-grid" id="library-grid" style="margin-top:16px;"></div>
+        </section>
+
+        <!-- SETTINGS TAB (SettingsScreen.kt Hierarchy) -->
+        <section class="tab-panel padded-page" id="tab-settings">
+          <div class="settings-layout">
+            <div class="settings-categories">
+              <h2>Ajustes</h2>
+              <input type="text" id="settings-search-input" placeholder="Buscar ajuste…" class="settings-search-box" />
+              <div class="settings-group-label">Você</div>
+              <button class="settings-cat-btn active" data-settings-sec="account">
+                <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4m0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4"/></svg></span>
+                <span>Conta &amp; Perfis</span>
+              </button>
+              <div class="settings-group-label">Visual</div>
+              <button class="settings-cat-btn" data-settings-sec="appearance">
+                <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M12 3a9 9 0 0 0 0 18c.83 0 1.5-.67 1.5-1.5 0-.39-.15-.74-.39-1.01-.23-.26-.38-.61-.38-.99 0-.83.67-1.5 1.5-1.5H16c2.76 0 5-2.24 5-5 0-4.42-4.03-8-9-8m-5.5 9c-.83 0-1.5-.67-1.5-1.5S5.67 9 6.5 9 8 9.67 8 10.5 7.33 12 6.5 12m3-4C8.67 8 8 7.33 8 6.5S8.67 5 9.5 5s1.5.67 1.5 1.5S10.33 8 9.5 8m5 0c-.83 0-1.5-.67-1.5-1.5S13.67 5 14.5 5s1.5.67 1.5 1.5S15.33 8 14.5 8m3 4c-.83 0-1.5-.67-1.5-1.5S16.67 9 17.5 9s1.5.67 1.5 1.5-.67 1.5-1.5 1.5"/></svg></span>
+                <span>Aparência &amp; Tema</span>
+              </button>
+              <button class="settings-cat-btn" data-settings-sec="layout">
+                <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M4 11h5V5H4zm0 7h5v-6H4zm6 0h5v-6h-5zm6 0h5v-6h-5zm-6-7h5V5h-5zm6-6v6h5V5z"/></svg></span>
+                <span>Layout &amp; Navegação</span>
+              </button>
+              <div class="settings-group-label">Assistir</div>
+              <button class="settings-cat-btn" data-settings-sec="addons">
+                <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M20.5 11H19V7a2 2 0 0 0-2-2h-4V3.5a2.5 2.5 0 0 0-5 0V5H4a2 2 0 0 0-1.99 2v3.8h1.5a2.7 2.7 0 0 1 0 5.4H2V20a2 2 0 0 0 2 2h3.8v-1.5a2.7 2.7 0 0 1 5.4 0V22H17a2 2 0 0 0 2-2v-4h1.5a2.5 2.5 0 0 0 0-5"/></svg></span>
+                <span>Addons</span>
+              </button>
+              <button class="settings-cat-btn" data-settings-sec="plugins">
+                <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="m9.4 16.6-4.6-4.6 4.6-4.6L8 6l-6 6 6 6zm5.2 0 4.6-4.6-4.6-4.6L16 6l6 6-6 6z"/></svg></span>
+                <span>Plugins</span>
+              </button>
+              <button class="settings-cat-btn" data-settings-sec="playback">
+                <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M8 5v14l11-7z"/></svg></span>
+                <span>Player, Legendas &amp; Skip</span>
+              </button>
+              <div class="settings-group-label">Serviços &amp; Sistema</div>
+              <button class="settings-cat-btn" data-settings-sec="services">
+                <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2m-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39"/></svg></span>
+                <span>Servidor &amp; APIs</span>
+              </button>
+              <button class="settings-cat-btn" data-settings-sec="system">
+                <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94s-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.74 8.87a.49.49 0 0 0 .12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 0 0-.12-.61zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6"/></svg></span>
+                <span>Sistema &amp; Cache</span>
+              </button>
+            </div>
+
+            <div class="settings-body">
+              <div class="settings-section active" id="sec-account">
+                <div class="settings-card">
+                  <h3>Conta Nuvio</h3>
+                  <div class="kv-line"><span>Status</span><strong id="set-account-status">-</strong></div>
+                  <div class="kv-line"><span>E-mail</span><strong id="set-account-email">-</strong></div>
+                  <div class="kv-line"><span>Servidor</span><strong id="set-account-server">-</strong></div>
+                  <div class="kv-line"><span>Perfil ativo</span><strong id="set-account-profile">-</strong></div>
+                  <div class="row-gap" style="margin-top: 16px;">
+                    <button class="btn-ghost" id="btn-switch-profile-screen">Trocar Perfil</button>
+                    <button class="btn-danger" id="btn-sign-out">Sair da Conta</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-section" id="sec-appearance">
+                <div class="settings-card stack-gap">
+                  <div>
+                    <h3>AMOLED Black (Preto Puro)</h3>
+                    <p class="muted">Fundo preto absoluto (#000000) em telas OLED.</p>
+                  </div>
+                  <label class="toggle-row">
+                    <span>Ativar Preto Puro (AMOLED)</span>
+                    <span class="nuvio-switch"><input type="checkbox" id="toggle-amoled" /><span class="nuvio-switch-track"></span></span>
+                  </label>
+                </div>
+
+                <div class="settings-card" style="margin-top: 16px;">
+                  <h3>Paleta de Tema</h3>
+                  <p class="muted">Escolha uma paleta predefinida ou personalize as cores</p>
+                  <div class="theme-swatches" id="theme-swatches"></div>
+                  <div id="custom-theme-editor" class="custom-theme-editor hidden">
+                    <div class="row-gap" style="margin-top:12px;">
+                      <label class="color-slot"><span>Destaque</span><input type="color" id="custom-color-0" value="#FFFFFF" /></label>
+                      <label class="color-slot"><span>Secundária</span><input type="color" id="custom-color-1" value="#B8BEC5" /></label>
+                      <label class="color-slot"><span>Sutil</span><input type="color" id="custom-color-2" value="#6E7178" /></label>
+                      <button class="btn-accent" id="btn-apply-custom-theme">Aplicar</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-section" id="sec-layout">
+                <div class="settings-card stack-gap">
+                  <h3>Navegação Desktop</h3>
+                  <div class="kv-line">
+                    <span>Estilo do menu principal</span>
+                    <select id="set-nav-style" class="nuvio-chip-select">
+                      <option value="sidebar">Barra Lateral (Sidebar)</option>
+                      <option value="top_bar">Barra Superior Flutuante</option>
+                    </select>
+                  </div>
+                  <div class="kv-line">
+                    <span>Comportamento da barra lateral</span>
+                    <select id="set-nav-mode" class="nuvio-chip-select">
+                      <option value="adaptive">Adaptativa (hover)</option>
+                      <option value="expanded">Sempre expandida</option>
+                      <option value="compact">Sempre compacta</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="settings-card stack-gap" style="margin-top: 16px;">
+                  <h3>Home, Detalhes &amp; Streams</h3>
+                  <label class="toggle-row"><span>Exibir Hero Banner na Home</span><span class="nuvio-switch"><input type="checkbox" id="set-show-hero" /><span class="nuvio-switch-track"></span></span></label>
+                  <label class="toggle-row"><span>Hover Preview nos pôsteres</span><span class="nuvio-switch"><input type="checkbox" id="set-hover-preview" /><span class="nuvio-switch-track"></span></span></label>
+                  <label class="toggle-row"><span>Desfocar miniaturas de episódios não assistidos</span><span class="nuvio-switch"><input type="checkbox" id="set-blur-episodes" /><span class="nuvio-switch-track"></span></span></label>
+                  <label class="toggle-row"><span>Mostrar ícone do addon nos cards de stream</span><span class="nuvio-switch"><input type="checkbox" id="set-show-addon-logo" /><span class="nuvio-switch-track"></span></span></label>
+                  <label class="toggle-row"><span>Mostrar badges de qualidade/tamanho nos streams</span><span class="nuvio-switch"><input type="checkbox" id="set-show-size-badge" /><span class="nuvio-switch-track"></span></span></label>
+                  <div class="kv-line">
+                    <span>Estilo de Continuar Assistindo</span>
+                    <select id="set-cw-style" class="nuvio-chip-select">
+                      <option value="card">Card (16:9)</option>
+                      <option value="wide">Largo (Wide)</option>
+                      <option value="poster">Pôster (2:3)</option>
+                    </select>
+                  </div>
+                  <div class="kv-line">
+                    <span>Fundo da tela de Detalhes</span>
+                    <select id="set-detail-bg-mode" class="nuvio-chip-select">
+                      <option value="cinematic">Cinematográfico</option>
+                      <option value="normal">Normal</option>
+                      <option value="dominant">Cor Dominante</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-section" id="sec-addons">
+                <div class="addons-page-stack">
+                  <div class="addons-sec-label">Visão Geral</div>
+                  <div class="addons-overview-card" id="addons-overview-card">
+                    <div class="addons-stat"><strong id="addons-stat-total">0</strong><span>Addons</span></div>
+                    <div class="addons-stat-divider"></div>
+                    <div class="addons-stat"><strong id="addons-stat-active">0</strong><span>Ativos</span></div>
+                    <div class="addons-stat-divider"></div>
+                    <div class="addons-stat"><strong id="addons-stat-catalogs">0</strong><span>Catálogos</span></div>
+                  </div>
+
+                  <div class="addons-sec-label">Adicionar Addon</div>
+                  <div class="settings-card stack-gap">
+                    <input type="text" id="addon-url-input" placeholder="https://example.com/manifest.json" />
+                    <button class="btn-accent addons-install-btn" id="btn-add-addon">Instalar</button>
+                    <div class="status-text" id="addon-status" style="margin-top:0;"></div>
+                  </div>
+
+                  <div class="addons-sec-label">Instalados</div>
+                  <div class="addons-stack" id="addons-list"></div>
+                </div>
+              </div>
+
+              <div class="settings-section" id="sec-plugins">
+                <div class="addons-page-stack">
+                  <div class="addons-sec-label">Visão Geral de Plugins</div>
+                  <div class="addons-overview-card">
+                    <div class="addons-stat"><strong id="plugins-stat-repos">0</strong><span>Repositórios</span></div>
+                    <div class="addons-stat-divider"></div>
+                    <div class="addons-stat"><strong id="plugins-stat-scrapers">0</strong><span>Scrapers</span></div>
+                    <div class="addons-stat-divider"></div>
+                    <div class="addons-stat"><strong id="plugins-stat-enabled">0</strong><span>Ativos</span></div>
+                  </div>
+
+                  <div class="settings-card stack-gap">
+                    <label class="toggle-row">
+                      <span>Ativar Plugins</span>
+                      <span class="nuvio-switch"><input type="checkbox" id="toggle-plugins-enabled" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <div class="row-gap">
+                      <input type="text" id="plugin-repo-url-input" placeholder="https://.../manifest.json" />
+                      <button class="btn-accent" id="btn-add-plugin-repo">Adicionar Repo</button>
+                    </div>
+                    <div class="status-text" id="plugin-repo-status"></div>
+                  </div>
+
+                  <div class="addons-sec-label">Repositórios Instalados</div>
+                  <div class="addons-stack" id="plugin-repos-list"></div>
+
+                  <div class="addons-sec-label">Scrapers</div>
+                  <div class="addons-stack" id="plugin-scrapers-list"></div>
+
+                  <div class="settings-card" style="margin-top:8px;">
+                    <h3>Testar Script Manual</h3>
+                    <div class="row-gap" style="margin-bottom:8px;">
+                      <input type="text" id="plugin-tmdb-id" value="603" style="max-width: 140px;" placeholder="TMDB ID" />
+                      <select id="plugin-media-type" style="max-width: 140px;">
+                        <option value="movie">movie</option>
+                        <option value="tv">tv</option>
+                      </select>
+                      <button class="btn-ghost" id="btn-run-plugin">Executar</button>
+                    </div>
+                    <textarea id="plugin-code" rows="6">function getStreams(tmdbId, mediaType, season, episode) {
+  var $ = cheerio.load('&lt;div class="item"&gt;&lt;a href="https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"&gt;1080p Demo&lt;/a&gt;&lt;/div&gt;');
+  var el = $('.item a').first();
+  return [{ name: 'Nuvio', title: mediaType + ' #' + tmdbId, url: el.attr('href'), quality: '1080p' }];
+}</textarea>
+                    <div class="status-text" id="plugin-status"></div>
+                    <div id="plugin-results" class="addons-stack"></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-section" id="sec-playback">
+                <div class="settings-card stack-gap">
+                  <h3>Player &amp; Idiomas</h3>
+                  <label class="toggle-row"><span>Abrir sempre no Player Externo</span><span class="nuvio-switch"><input type="checkbox" id="set-external-player" /><span class="nuvio-switch-track"></span></span></label>
+                  <label class="toggle-row"><span>Overlay de Pausa ("Você está assistindo")</span><span class="nuvio-switch"><input type="checkbox" id="set-pause-overlay" /><span class="nuvio-switch-track"></span></span></label>
+                  <label class="toggle-row"><span>Cartão de Próximo Episódio</span><span class="nuvio-switch"><input type="checkbox" id="set-next-ep" /><span class="nuvio-switch-track"></span></span></label>
+                  <label class="toggle-row"><span>Segurar mouse/Espaço para acelerar vídeo</span><span class="nuvio-switch"><input type="checkbox" id="set-hold-speed" /><span class="nuvio-switch-track"></span></span></label>
+                  <div class="kv-line">
+                    <span>Velocidade ao segurar</span>
+                    <select id="set-hold-speed-val" class="nuvio-chip-select">
+                      <option value="1.5">1.5x</option>
+                      <option value="2">2.0x</option>
+                      <option value="2.5">2.5x</option>
+                      <option value="3">3.0x</option>
+                    </select>
+                  </div>
+                  <div class="kv-line">
+                    <span>Idioma preferido de Áudio (código)</span>
+                    <input type="text" id="set-pref-audio" style="max-width:140px;" placeholder="por" />
+                  </div>
+                  <div class="kv-line">
+                    <span>Idioma preferido de Legenda (código)</span>
+                    <input type="text" id="set-pref-sub" style="max-width:140px;" placeholder="pt-br" />
+                  </div>
+                  <label class="field-col">
+                    <span>Caminho customizado do player externo</span>
+                    <input type="text" id="set-mpv-path" placeholder="Automático (player integrado)" />
+                  </label>
+                </div>
+
+                <div class="settings-card stack-gap" style="margin-top: 16px;">
+                  <h3>Pular Abertura &amp; Segmentos</h3>
+                  <label class="toggle-row"><span>Exibir botão "Pular abertura / encerramento"</span><span class="nuvio-switch"><input type="checkbox" id="set-skip-enabled" /><span class="nuvio-switch-track"></span></span></label>
+                  <label class="toggle-row"><span>Pular Abertura automaticamente (Auto-Skip)</span><span class="nuvio-switch"><input type="checkbox" id="set-autoskip-intro" /><span class="nuvio-switch-track"></span></span></label>
+                  <label class="toggle-row"><span>Pular Recapitulação automaticamente</span><span class="nuvio-switch"><input type="checkbox" id="set-autoskip-recap" /><span class="nuvio-switch-track"></span></span></label>
+                  <label class="toggle-row"><span>Pular Encerramento / Créditos automaticamente</span><span class="nuvio-switch"><input type="checkbox" id="set-autoskip-outro" /><span class="nuvio-switch-track"></span></span></label>
+                  <label class="toggle-row"><span>Usar AniSkip para animes</span><span class="nuvio-switch"><input type="checkbox" id="set-aniskip" /><span class="nuvio-switch-track"></span></span></label>
+                  <label class="field-col">
+                    <span>URL da API IntroDB (opcional)</span>
+                    <input type="text" id="set-introdb-url" placeholder="https://api.introdb.app" />
+                  </label>
+                  <label class="field-col">
+                    <span>Chave da API IntroDB (opcional para enviar segmentos)</span>
+                    <input type="password" id="set-introdb-key" placeholder="Bearer API Key" />
+                  </label>
+                </div>
+
+                <div class="settings-card stack-gap" style="margin-top: 16px;">
+                  <h3>Aparência Padrão das Legendas</h3>
+                  <div class="kv-line">
+                    <span>Tamanho da fonte (sp)</span>
+                    <input type="number" id="set-sub-size" min="8" max="42" style="max-width:100px;" />
+                  </div>
+                  <label class="toggle-row"><span>Negrito</span><span class="nuvio-switch"><input type="checkbox" id="set-sub-bold" /><span class="nuvio-switch-track"></span></span></label>
+                  <label class="toggle-row"><span>Contorno</span><span class="nuvio-switch"><input type="checkbox" id="set-sub-outline" /><span class="nuvio-switch-track"></span></span></label>
+                  <label class="toggle-row"><span>Sombra projetada</span><span class="nuvio-switch"><input type="checkbox" id="set-sub-shadow" /><span class="nuvio-switch-track"></span></span></label>
+                  <div class="row-gap" style="margin-top:6px;">
+                    <button class="btn-accent" id="btn-save-settings">Salvar Ajustes de Reprodução</button>
+                    <span class="status-text" id="settings-status"></span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-section" id="sec-services">
+                <div class="settings-card stack-gap">
+                  <h3>Servidor &amp; APIs</h3>
+                  <label class="field-col">
+                    <span>TMDB API Key (opcional para Plugins JS)</span>
+                    <input type="password" id="set-tmdb-key" placeholder="TMDB v3 API Key" />
+                  </label>
+                  <div class="row-gap">
+                    <button class="btn-accent" id="btn-save-services">Salvar API Key</button>
+                    <span class="status-text" id="services-status"></span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-section" id="sec-system">
+                <div class="settings-card stack-gap">
+                  <h3>Cache &amp; Diagnóstico Nativo</h3>
+                  <div class="row-gap">
+                    <button class="btn-ghost" id="btn-clear-cw-cache">Limpar cache de Continuar Assistindo</button>
+                    <span class="status-text" id="cache-status"></span>
+                  </div>
+                  <div class="diag-box" id="diag-box"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <!-- 4. EMBEDDED IN-APP PLAYER VIEW -->
+  <div id="view-player" class="view">
+    <div class="player-shell" id="player-shell">
+      <div class="player-topbar" id="player-topbar">
+        <div class="player-topbar-left">
+          <button class="circle-back-btn" id="btn-player-back" title="Fechar Player">
+            <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M15.41 7.41L14 6l-6 6l6 6l1.41-1.41L10.83 12z"/></svg>
+          </button>
+          <div>
+            <div class="player-title" id="player-title">Reproduzindo</div>
+            <div class="player-sub" id="player-sub"></div>
+          </div>
+        </div>
+        <div class="player-topbar-right">
+          <select id="player-audio-select" class="player-select" title="Faixa de Áudio"></select>
+          <select id="player-sub-select" class="player-select" title="Legendas"></select>
+          <select id="player-speed-select" class="player-select" title="Velocidade">
+            <option value="0.75">0.75x</option>
+            <option value="1" selected>1.0x</option>
+            <option value="1.25">1.25x</option>
+            <option value="1.5">1.5x</option>
+            <option value="2">2.0x</option>
+          </select>
+          <button class="btn-ghost" id="btn-player-fullscreen" title="Tela Cheia">⛶</button>
+        </div>
+      </div>
+
+      <div class="player-video-stage" id="player-video-stage">
+        <div class="player-stage-status" id="player-stage-status">Iniciando player integrado…</div>
+      </div>
+
+      <div class="player-bottombar" id="player-bottombar">
+        <div class="player-seek-row">
+          <span class="player-time" id="player-time-cur">00:00</span>
+          <input type="range" id="player-seek" min="0" max="100" step="0.5" value="0" class="player-range" />
+          <span class="player-time" id="player-time-dur">00:00</span>
+        </div>
+        <div class="player-controls-row">
+          <div class="row-gap">
+            <button class="btn-ghost" id="btn-player-back10">-10s</button>
+            <button class="btn-accent" id="btn-player-playpause">Pausar</button>
+            <button class="btn-ghost" id="btn-player-fwd10">+10s</button>
+            <span class="muted" id="player-buffer-badge"></span>
+          </div>
+          <div class="row-gap" style="width: 200px;">
+            <span class="muted">Vol</span>
+            <input type="range" id="player-volume" min="0" max="150" value="100" class="player-range" />
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5. GLOBAL OVERLAYS (HOVER PREVIEW, CONTEXT ZOOM MENU, MODALS, TOAST) -->
+  <div id="hover-preview-popup" class="hover-preview-popup hidden"></div>
+
+  <div id="poster-context-overlay" class="context-zoom-backdrop hidden">
+    <div class="context-zoom-card" id="poster-context-card"></div>
+  </div>
+
+  <div class="modal-backdrop hidden" id="nuvio-confirm-modal">
+    <div class="small-modal">
+      <h3 id="confirm-modal-title">Confirmar</h3>
+      <p class="muted" id="confirm-modal-msg"></p>
+      <div class="row-gap" style="justify-content:flex-end;">
+        <button class="btn-ghost" id="btn-confirm-no">Não</button>
+        <button class="btn-danger" id="btn-confirm-yes">Sim</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop hidden" id="custom-server-modal">
+    <div class="small-modal">
+      <h3>Servidor Customizado</h3>
+      <p class="muted">Informe a URL da sua instância auto-hospedada do Nuvio</p>
+      <input type="url" id="custom-server-input" placeholder="https://nuvio.exemplo.com" />
+      <div class="auth-error hidden" id="custom-server-error"></div>
+      <div class="row-gap" style="justify-content:flex-end;">
+        <button class="btn-ghost" id="btn-custom-server-cancel">Cancelar</button>
+        <button class="btn-accent" id="btn-custom-server-connect">Conectar</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-host" class="toast-host"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

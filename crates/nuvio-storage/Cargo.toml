@@ -1,0 +1,22 @@
+[package]
+name = "nuvio-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+directories.workspace = true
+rusqlite.workspace = true
+redb.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+pbkdf2.workspace = true
+aes-gcm.workspace = true
+aes.workspace = true
+cbc.workspace = true
+ecb.workspace = true
+rand.workspace = true
+hex.workspace = true
