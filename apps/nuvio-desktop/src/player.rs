@@ -550,6 +550,7 @@ impl EmbeddedPlayer {
         };
 
         let wid = surface.wid_string();
+        #[cfg(not(target_os = "windows"))]
         let host_id = surface.raw_id();
         #[cfg(target_os = "linux")]
         let parent_id = surface.parent_id();
@@ -606,7 +607,7 @@ impl EmbeddedPlayer {
         #[cfg(target_os = "windows")]
         let win_overlay = create_windows_overlay(&app, window, &controls_url).ok();
         #[cfg(target_os = "windows")]
-        if let (Some(ref win_ov), Some(ref init_json)) = (&win_overlay, &initial_controls_json) {
+        if let (Some(win_ov), Some(init_json)) = (&win_overlay, &initial_controls_json) {
             let script = format!("window.playerControls&&window.playerControls({init_json})");
             let _ = win_ov.eval(&script);
         }
