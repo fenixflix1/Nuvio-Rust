@@ -146,7 +146,7 @@ pub async fn resolve_skip_intervals(
     aniskip_enabled: bool,
     chapter_intervals: Vec<SkipInterval>,
 ) -> Vec<SkipInterval> {
-    let client = match Client::builder()
+    let client = match nuvio_core::storage::dns::client_builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
     {
@@ -515,7 +515,7 @@ pub async fn submit_introdb_segment(
     if end_sec <= start_sec {
         return Err("Tempo final deve ser maior que o tempo inicial.".to_string());
     }
-    let client = Client::builder()
+    let client = nuvio_core::storage::dns::client_builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| e.to_string())?;

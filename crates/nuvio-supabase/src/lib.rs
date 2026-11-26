@@ -164,7 +164,7 @@ pub async fn discover_nuvio_server(server_input: &str) -> Result<DiscoveryDocume
     url.set_path(&discovery_path);
     url.set_query(None);
 
-    let client = Client::builder().build()?;
+    let client = nuvio_storage::dns::client_builder().build()?;
     let resp = client.get(url).send().await?;
     let status = resp.status();
     let body = resp.text().await?;
@@ -247,7 +247,7 @@ impl SupabaseConfig {
             .set_scheme(ws_scheme)
             .map_err(|_| url::ParseError::InvalidDomainCharacter)?;
         Ok(format!(
-            "{}/realtime/v1/websocket?apikey={}&vsn=1.0.0",
+            "{}/realtime/v1/websocket?apikey={}&vsn=1.0.0&nuvio_realtime=1",
             parsed.as_str().trim_end_matches('/'),
             self.anon_key
         ))
@@ -282,7 +282,7 @@ pub struct SupabaseClient {
 
 impl SupabaseClient {
     pub fn new(config: SupabaseConfig) -> Result<Self> {
-        let http = Client::builder().build()?;
+        let http = nuvio_storage::dns::client_builder().build()?;
         Ok(Self {
             config,
             http,
@@ -798,7 +798,7 @@ mod tests {
         assert_eq!(cfg.rest_url(), "https://example.supabase.co/rest/v1");
         assert_eq!(
             cfg.realtime_ws_url().unwrap(),
-            "wss://example.supabase.co/realtime/v1/websocket?apikey=anon123&vsn=1.0.0"
+            "wss://example.supabase.co/realtime/v1/websocket?apikey=anon123&vsn=1.0.0&nuvio_realtime=1"
         );
     }
 }

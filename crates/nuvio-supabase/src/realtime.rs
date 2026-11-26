@@ -24,7 +24,7 @@ pub struct RealtimeConnection {
 impl RealtimeConnection {
     pub async fn connect(
         config: &SupabaseConfig,
-        access_token: Option<&str>,
+        _access_token: Option<&str>,
     ) -> Result<(Self, mpsc::Receiver<PhoenixFrame>)> {
         let ws_url = config.realtime_ws_url()?;
         let (ws_stream, _) = connect_async(&ws_url).await?;
@@ -59,10 +59,6 @@ impl RealtimeConnection {
             ref_counter: AtomicU64::new(1),
         };
 
-        if let Some(token) = access_token {
-            let _ = conn.send_access_token("realtime:public", token).await;
-        }
-
         Ok((conn, in_rx))
     }
 
@@ -75,6 +71,47 @@ impl RealtimeConnection {
             topic: topic.to_string(),
             event: "phx_join".to_string(),
             payload,
+            ref_id: Some(self.next_ref()),
+        };
+        let _ = self.outbound_tx.send(frame).await;
+        Ok(())
+    }
+
+    pub async fn leave_channel(&self, topic: &str) -> Result<()> {
+        let frame = PhoenixFrame {
+            topic: topic.to_string(),
+            event: "phx_leave".to_string(),
+            payload: serde_json::json!({}),
+            ref_id: Some(self.next_ref()),
+        };
+        let _ = self.outbound_tx.send(frame).await;
+        Ok(())
+    }
+
+    pub async fn broadcast(&self, topic: &str, event: &str, payload: Value) -> Result<()> {
+        let frame = PhoenixFrame {
+            topic: topic.to_string(),
+            event: "broadcast".to_string(),
+            payload: serde_json::json!({
+                "type": "broadcast",
+                "event": event,
+                "payload": payload,
+            }),
+            ref_id: Some(self.next_ref()),
+        };
+        let _ = self.outbound_tx.send(frame).await;
+        Ok(())
+    }
+
+    pub async fn track_presence(&self, topic: &str, payload: Value) -> Result<()> {
+        let frame = PhoenixFrame {
+            topic: topic.to_string(),
+            event: "presence".to_string(),
+            payload: serde_json::json!({
+                "type": "presence",
+                "event": "track",
+                "payload": payload,
+            }),
             ref_id: Some(self.next_ref()),
         };
         let _ = self.outbound_tx.send(frame).await;

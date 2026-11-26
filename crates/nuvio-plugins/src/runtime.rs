@@ -11,8 +11,13 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{Notify, Semaphore};
 
+// Measured with the installed scrapers: 28 concurrent runs peak around 290 MB RSS and
+// finish in ~25 s, while 4 runs peak at ~180 MB but take ~63 s. Keep the parallelism;
+// the shared caches and the per-runtime heap cap are what bound memory.
 pub const MAX_CONCURRENT_PLUGINS: usize = 28;
 const TMDB_CACHE_TTL: Duration = Duration::from_secs(900);
+const TMDB_CACHE_MAX_ENTRIES: usize = 96;
+const TMDB_CACHE_MAX_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 const PLUGIN_EXEC_DEADLINE: Duration = Duration::from_secs(25);
 
 static PLUGIN_SEMAPHORE: LazyLock<Semaphore> =
@@ -27,7 +32,7 @@ static PLUGIN_HTTP_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 });
 
 static CLIENT_FOLLOW: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
+    nuvio_storage::dns::client_builder()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(10))
@@ -36,7 +41,7 @@ static CLIENT_FOLLOW: LazyLock<reqwest::Client> = LazyLock::new(|| {
 });
 
 static CLIENT_MANUAL: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
+    nuvio_storage::dns::client_builder()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(10))
@@ -48,6 +53,7 @@ static CLIENT_MANUAL: LazyLock<reqwest::Client> = LazyLock::new(|| {
 #[derive(Clone)]
 struct CachedTmdbEntry {
     expires_at: Instant,
+    bytes: usize,
     payload_template: serde_json::Value,
 }
 
@@ -89,6 +95,47 @@ pub fn reset_tmdb_cache_stats() {
 pub fn clear_tmdb_cache() {
     TMDB_RESPONSE_CACHE.lock().expect("tmdb cache").clear();
     reset_tmdb_cache_stats();
+}
+
+/// Stores a TMDB payload without letting the shared cache grow for the whole session.
+/// Expired entries are pruned on every insert and the total size is bounded by bytes,
+/// not per response, so large metadata payloads stay shared between scrapers.
+fn cache_tmdb_payload(cache_key: String, payload: serde_json::Value) {
+    let body_len = payload
+        .get("body")
+        .and_then(serde_json::Value::as_str)
+        .map_or(0, str::len);
+    let bytes = body_len.saturating_add(256);
+    if bytes > TMDB_CACHE_MAX_TOTAL_BYTES {
+        return;
+    }
+    let now = Instant::now();
+    let mut cache = TMDB_RESPONSE_CACHE.lock().expect("tmdb cache");
+    cache.retain(|_, entry| entry.expires_at > now);
+    let mut total: usize = cache.values().map(|entry| entry.bytes).sum();
+    while !cache.is_empty()
+        && (cache.len() >= TMDB_CACHE_MAX_ENTRIES
+            || total.saturating_add(bytes) > TMDB_CACHE_MAX_TOTAL_BYTES)
+    {
+        let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.expires_at)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        if let Some(removed) = cache.remove(&oldest) {
+            total = total.saturating_sub(removed.bytes);
+        }
+    }
+    cache.insert(
+        cache_key,
+        CachedTmdbEntry {
+            expires_at: now + TMDB_CACHE_TTL,
+            bytes,
+            payload_template: payload,
+        },
+    );
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1054,13 +1101,7 @@ async fn execute_http_async(
             if let Ok(v) = res_val
                 && v.get("ok").and_then(|o| o.as_bool()) == Some(true)
             {
-                TMDB_RESPONSE_CACHE.lock().expect("tmdb cache").insert(
-                    cache_key.clone(),
-                    CachedTmdbEntry {
-                        expires_at: Instant::now() + TMDB_CACHE_TTL,
-                        payload_template: v,
-                    },
-                );
+                cache_tmdb_payload(cache_key.clone(), v);
             }
             {
                 *slot.result.lock().expect("slot") = Some(serialized.clone());

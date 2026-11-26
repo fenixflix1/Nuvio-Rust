@@ -27,6 +27,20 @@ impl MdbListClient {
         })
     }
 
+    pub async fn ratings(&self, provider: &str, kind: &str, id: &str) -> Result<Vec<Value>> {
+        let kind = if kind == "movie" { "movie" } else { "show" };
+        let data: Value = self
+            .http
+            .get(format!("{MDBLIST_API_URL}/{provider}/{kind}/{id}/"))
+            .query(&[("apikey", &self.api_key)])
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(data["ratings"].as_array().cloned().unwrap_or_default())
+    }
+
     pub async fn my_lists(&self) -> Result<Vec<MdbListSummary>> {
         let resp = self
             .http

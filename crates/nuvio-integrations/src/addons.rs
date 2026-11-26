@@ -440,11 +440,9 @@ impl AddonClient {
             });
         }
         let root: Value = serde_json::from_str(&body)?;
-        let metas = root
-            .get("metas")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let Some(metas) = root.get("metas").and_then(Value::as_array) else {
+            return Ok(Vec::new());
+        };
 
         let mut items = Vec::new();
         for meta in metas {

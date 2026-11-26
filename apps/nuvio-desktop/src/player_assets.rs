@@ -42,6 +42,8 @@ pub fn export_player_ui_assets(cache_dir: &Path) -> Result<String, String> {
     write_if_missing_or_diff(&dir.join("party.css"), PARTY_CSS.as_bytes())?;
     write_if_missing_or_diff(&dir.join("party.js"), PARTY_JS.as_bytes())?;
 
+    write_if_missing_or_diff(&dir.join("seek-preview.js"), include_bytes!("../ui/player-ui/seek-preview.js"))?;
+
     let html_path = dir.join("controls.html");
     write_if_missing_or_diff(&html_path, CONTROLS_HTML.as_bytes())?;
     Ok(path_to_file_url(&html_path))

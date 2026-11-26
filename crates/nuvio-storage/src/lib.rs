@@ -1,5 +1,6 @@
 pub mod cache;
 pub mod crypto;
+pub mod dns;
 pub mod paths;
 pub mod store;
 

@@ -231,6 +231,44 @@
   margin-top: 8px;
 }
 
+.party-join-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.party-join-input {
+  box-sizing: border-box;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 44px;
+  padding: 0 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, .14);
+  background: rgba(255, 255, 255, .07);
+  color: var(--theme-text-primary);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+
+.party-join-input::placeholder {
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--theme-text-muted);
+  font-weight: 400;
+}
+
+.party-join-row .party-join-btn {
+  width: auto;
+  min-height: 44px;
+  padding: 0 18px;
+  flex: 0 0 auto;
+}
+
 .party-seats-hero {
   --party-avatar-size: 56px;
   position: relative;

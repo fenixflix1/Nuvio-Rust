@@ -636,6 +636,8 @@ const syncVolumeControl = () => {
   }
 };
 
+const seekPreview = bindSeekPreview(seek, () => state.seekPreview, () => state.durationMs || 0);
+
 const seekToastLabel = command => {
   if (command === "seekBack" || command === "keyboardSeekBack") return "-10s";
   if (command === "seekForward" || command === "keyboardSeekForward") return "+10s";
@@ -644,6 +646,10 @@ const seekToastLabel = command => {
 };
 
 const showCommandToast = command => {
+  if (/^keyboardSeek(Forward|Back)$/.test(command)) {
+    const step = 10000;
+    seekPreview.show("keyboard", Math.max(0, Math.min(state.durationMs, state.positionMs + (command.endsWith("Back") ? -step : step))));
+  }
   queueSettingToast(command);
   const seekLabel = seekToastLabel(command);
   if (seekLabel) {
@@ -4440,10 +4446,12 @@ document.addEventListener("keydown", event => {
   }
   if (command === "keyboardFineSeekForward") {
     fineSeek(true);
+    seekPreview.show("keyboard", state.positionMs);
     return;
   }
   if (command === "keyboardFineSeekBack") {
     fineSeek(false);
+    seekPreview.show("keyboard", state.positionMs);
     return;
   }
   showCommandToast(command);

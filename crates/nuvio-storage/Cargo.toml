@@ -6,10 +6,12 @@ license.workspace = true
 
 [dependencies]
 directories.workspace = true
+reqwest.workspace = true
 rusqlite.workspace = true
 redb.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
 thiserror.workspace = true
 sha2.workspace = true
 hmac.workspace = true

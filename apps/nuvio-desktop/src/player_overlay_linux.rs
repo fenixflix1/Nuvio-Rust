@@ -91,8 +91,11 @@ struct GtkApis {
 
     gtk_window_new: unsafe extern "C" fn(c_int) -> *mut c_void,
     gtk_window_set_decorated: unsafe extern "C" fn(*mut c_void, c_int),
+    gtk_window_set_accept_focus: unsafe extern "C" fn(*mut c_void, c_int),
     gtk_window_resize: unsafe extern "C" fn(*mut c_void, c_int, c_int),
     gtk_widget_set_app_paintable: unsafe extern "C" fn(*mut c_void, c_int),
+    gtk_widget_set_can_focus: unsafe extern "C" fn(*mut c_void, c_int),
+    gtk_widget_grab_focus: unsafe extern "C" fn(*mut c_void),
     gtk_widget_get_screen: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
     gtk_widget_set_visual: unsafe extern "C" fn(*mut c_void, *mut c_void),
     gtk_widget_add_events: unsafe extern "C" fn(*mut c_void, c_int),
@@ -126,10 +129,12 @@ struct GtkApis {
     gdk_x11_display_error_trap_pop_ignored: unsafe extern "C" fn(*mut c_void),
     gdk_x11_window_set_frame_sync_enabled: unsafe extern "C" fn(*mut c_void, c_int),
 
-    webkit_user_content_manager_new: unsafe extern "C" fn() -> *mut c_void,
+    webkit_web_context_new_ephemeral: unsafe extern "C" fn() -> *mut c_void,
+    webkit_web_view_new_with_context: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
+    webkit_web_view_get_user_content_manager: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
+    webkit_web_view_terminate_web_process: unsafe extern "C" fn(*mut c_void),
     webkit_user_content_manager_register_script_message_handler:
         unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int,
-    webkit_web_view_new_with_user_content_manager: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
     webkit_web_view_set_background_color: unsafe extern "C" fn(*mut c_void, *const GdkRgba),
     webkit_web_view_get_settings: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
     webkit_settings_set_allow_file_access_from_file_urls: unsafe extern "C" fn(*mut c_void, c_int),
@@ -268,8 +273,11 @@ fn gtk_apis() -> Result<&'static GtkApis, String> {
             g_cancellable_cancel: load_sym(&gio, b"g_cancellable_cancel\0")?,
             gtk_window_new: load_sym(&gtk, b"gtk_window_new\0")?,
             gtk_window_set_decorated: load_sym(&gtk, b"gtk_window_set_decorated\0")?,
+            gtk_window_set_accept_focus: load_sym(&gtk, b"gtk_window_set_accept_focus\0")?,
             gtk_window_resize: load_sym(&gtk, b"gtk_window_resize\0")?,
             gtk_widget_set_app_paintable: load_sym(&gtk, b"gtk_widget_set_app_paintable\0")?,
+            gtk_widget_set_can_focus: load_sym(&gtk, b"gtk_widget_set_can_focus\0")?,
+            gtk_widget_grab_focus: load_sym(&gtk, b"gtk_widget_grab_focus\0")?,
             gtk_widget_get_screen: load_sym(&gtk, b"gtk_widget_get_screen\0")?,
             gtk_widget_set_visual: load_sym(&gtk, b"gtk_widget_set_visual\0")?,
             gtk_widget_add_events: load_sym(&gtk, b"gtk_widget_add_events\0")?,
@@ -316,17 +324,25 @@ fn gtk_apis() -> Result<&'static GtkApis, String> {
                 &gdk,
                 b"gdk_x11_window_set_frame_sync_enabled\0",
             )?,
-            webkit_user_content_manager_new: load_sym(
+            webkit_web_context_new_ephemeral: load_sym(
                 &wk,
-                b"webkit_user_content_manager_new\0",
+                b"webkit_web_context_new_ephemeral\0",
+            )?,
+            webkit_web_view_new_with_context: load_sym(
+                &wk,
+                b"webkit_web_view_new_with_context\0",
+            )?,
+            webkit_web_view_get_user_content_manager: load_sym(
+                &wk,
+                b"webkit_web_view_get_user_content_manager\0",
+            )?,
+            webkit_web_view_terminate_web_process: load_sym(
+                &wk,
+                b"webkit_web_view_terminate_web_process\0",
             )?,
             webkit_user_content_manager_register_script_message_handler: load_sym(
                 &wk,
                 b"webkit_user_content_manager_register_script_message_handler\0",
-            )?,
-            webkit_web_view_new_with_user_content_manager: load_sym(
-                &wk,
-                b"webkit_web_view_new_with_user_content_manager\0",
             )?,
             webkit_web_view_set_background_color: load_sym(
                 &wk,
@@ -731,6 +747,7 @@ unsafe extern "C" fn idle_create_overlay(data: *mut c_void) -> c_int {
     unsafe {
         let win = (apis.gtk_window_new)(0);
         (apis.gtk_window_set_decorated)(win, 0);
+        (apis.gtk_window_set_accept_focus)(win, 1);
         (apis.gtk_widget_set_app_paintable)(win, 1);
         let screen = (apis.gtk_widget_get_screen)(win);
         let rgba_vis = (apis.gdk_screen_get_rgba_visual)(screen);
@@ -738,7 +755,12 @@ unsafe extern "C" fn idle_create_overlay(data: *mut c_void) -> c_int {
             (apis.gtk_widget_set_visual)(win, rgba_vis);
         }
 
-        let ucm = (apis.webkit_user_content_manager_new)();
+        let wk_ctx = (apis.webkit_web_context_new_ephemeral)();
+        let wv = (apis.webkit_web_view_new_with_context)(wk_ctx);
+        if !wk_ctx.is_null() {
+            (apis.g_object_unref)(wk_ctx);
+        }
+        let ucm = (apis.webkit_web_view_get_user_content_manager)(wv);
         let h_player = b"player\0";
         let h_dirty = b"overlayDirty\0";
         (apis.webkit_user_content_manager_register_script_message_handler)(
@@ -768,8 +790,7 @@ unsafe extern "C" fn idle_create_overlay(data: *mut c_void) -> c_int {
             null(),
             0,
         );
-
-        let wv = (apis.webkit_web_view_new_with_user_content_manager)(ucm);
+        (apis.gtk_widget_set_can_focus)(wv, 1);
         let transparent = GdkRgba {
             red: 0.0,
             green: 0.0,
@@ -809,6 +830,14 @@ unsafe extern "C" fn idle_create_overlay(data: *mut c_void) -> c_int {
             0,
         );
         (apis.g_signal_connect_data)(
+            wv,
+            sig_btn.as_ptr().cast(),
+            on_button_press as *const c_void,
+            data,
+            null(),
+            0,
+        );
+        (apis.g_signal_connect_data)(
             win,
             sig_btn.as_ptr().cast(),
             on_button_press as *const c_void,
@@ -827,6 +856,7 @@ unsafe extern "C" fn idle_create_overlay(data: *mut c_void) -> c_int {
 
         (apis.gtk_container_add)(win, wv);
         (apis.gtk_widget_add_events)(win, GDK_EVENT_MASK_OVERLAY);
+        (apis.gtk_widget_add_events)(wv, GDK_EVENT_MASK_OVERLAY);
         (apis.gtk_widget_realize)(win);
 
         let gdk_win = (apis.gtk_widget_get_window)(win);
@@ -885,10 +915,7 @@ unsafe extern "C" fn idle_create_overlay(data: *mut c_void) -> c_int {
         ov.overlay_xid = gtk_xid;
         ov.composite_timer = (apis.g_timeout_add)(33, composite_tick, data);
 
-        (apis.gdk_x11_display_error_trap_push)(gdk_display);
-        (apis.x_set_input_focus)(dpy, gtk_xid, 1, 0);
-        (apis.x_flush)(dpy);
-        (apis.gdk_x11_display_error_trap_pop_ignored)(gdk_display);
+        focus_overlay_gtk(ov);
     }
     0
 }
@@ -938,25 +965,35 @@ unsafe extern "C" fn idle_flush_js(data: *mut c_void) -> c_int {
     0
 }
 
+unsafe fn focus_overlay_gtk(ov: &OverlayImpl) {
+    if ov.overlay_xid == 0 || ov.gtk_window.is_null() {
+        return;
+    }
+    unsafe {
+        (ov.apis.gtk_window_set_accept_focus)(ov.gtk_window, 1);
+        if !ov.webview.is_null() {
+            (ov.apis.gtk_widget_set_can_focus)(ov.webview, 1);
+            (ov.apis.gtk_widget_grab_focus)(ov.webview);
+        }
+        let gw = (ov.apis.gtk_widget_get_window)(ov.gtk_window);
+        if !gw.is_null() {
+            let gdk_display = (ov.apis.gdk_window_get_display)(gw);
+            let dpy = (ov.apis.gdk_x11_display_get_xdisplay)(gdk_display);
+            (ov.apis.gdk_x11_display_error_trap_push)(gdk_display);
+            (ov.apis.x_set_input_focus)(dpy, ov.overlay_xid, 1, 0);
+            (ov.apis.x_flush)(dpy);
+            (ov.apis.gdk_x11_display_error_trap_pop_ignored)(gdk_display);
+        }
+    }
+}
+
 unsafe extern "C" fn idle_focus_overlay(data: *mut c_void) -> c_int {
     let raw = data as usize;
     if !is_alive(raw) {
         return 0;
     }
     let ov = unsafe { &*(raw as *const OverlayImpl) };
-    if ov.overlay_xid != 0 && !ov.gtk_window.is_null() {
-        unsafe {
-            let gw = (ov.apis.gtk_widget_get_window)(ov.gtk_window);
-            if !gw.is_null() {
-                let gdk_display = (ov.apis.gdk_window_get_display)(gw);
-                let dpy = (ov.apis.gdk_x11_display_get_xdisplay)(gdk_display);
-                (ov.apis.gdk_x11_display_error_trap_push)(gdk_display);
-                (ov.apis.x_set_input_focus)(dpy, ov.overlay_xid, 1, 0);
-                (ov.apis.x_flush)(dpy);
-                (ov.apis.gdk_x11_display_error_trap_pop_ignored)(gdk_display);
-            }
-        }
-    }
+    unsafe { focus_overlay_gtk(ov) };
     0
 }
 
@@ -1003,6 +1040,9 @@ unsafe extern "C" fn idle_destroy_overlay(data: *mut c_void) -> c_int {
             let destroy_dpy = (apis.gtk_widget_get_display)(ov.gtk_window);
             if !destroy_dpy.is_null() {
                 (apis.gdk_x11_display_error_trap_push)(destroy_dpy);
+            }
+            if !ov.webview.is_null() {
+                (apis.webkit_web_view_terminate_web_process)(ov.webview);
             }
             (apis.gtk_widget_hide)(ov.gtk_window);
             (apis.gtk_widget_destroy)(ov.gtk_window);
@@ -1063,6 +1103,9 @@ unsafe extern "C" fn on_button_press(
     }
     let ov = unsafe { &*(raw as *const OverlayImpl) };
     let btn = unsafe { (*ev).button };
+    if btn == 1 {
+        unsafe { focus_overlay_gtk(ov) };
+    }
     let action = match btn {
         8 => "seekBack",
         9 => "seekForward",
@@ -1139,6 +1182,8 @@ unsafe extern "C" fn on_player_message(_ucm: *mut c_void, js: *mut c_void, data:
 
             if ty == "controlsReady" {
                 let _ = idle_apply_controls(data);
+            } else if ty == "focusOverlay" {
+                focus_overlay_gtk(ov);
             }
             (ov.on_event)(&ty, value);
             (apis.g_free)(c_type.cast());

@@ -3289,7 +3289,7 @@ dependencies = [
 
 [[package]]
 name = "nuvio-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nuvio-integrations",
  "nuvio-p2p",
@@ -3304,7 +3304,7 @@ dependencies = [
 
 [[package]]
 name = "nuvio-desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libloading 0.9.1",
  "nuvio-core",
@@ -3323,9 +3323,10 @@ dependencies = [
 
 [[package]]
 name = "nuvio-integrations"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
+ "nuvio-storage",
  "reqwest",
  "sentry",
  "serde",
@@ -3338,7 +3339,7 @@ dependencies = [
 
 [[package]]
 name = "nuvio-p2p"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libloading 0.9.1",
  "librqbit",
@@ -3349,7 +3350,7 @@ dependencies = [
 
 [[package]]
 name = "nuvio-plugins"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "hex 0.4.3",
@@ -3367,7 +3368,7 @@ dependencies = [
 
 [[package]]
 name = "nuvio-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -3379,18 +3380,21 @@ dependencies = [
  "pbkdf2",
  "rand 0.8.8",
  "redb",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
 name = "nuvio-supabase"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
+ "nuvio-storage",
  "reqwest",
  "serde",
  "serde_json",

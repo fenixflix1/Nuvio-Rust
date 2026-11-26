@@ -86,9 +86,12 @@ mainViewportEl.addEventListener(
       hideHoverPreview();
     }
 
+    if (activeTabName() === 'details') {
+      updateDetailScrollDim();
+    }
+
     if (
-      document.getElementById('tab-search')?.classList.contains('active')
-      && !searchInputEl.value.trim()
+      activeTabName() === 'discover'
       && mainViewportEl.scrollTop + mainViewportEl.clientHeight >= mainViewportEl.scrollHeight - 260
     ) {
       maybeInfiniteDiscover();
@@ -103,6 +106,14 @@ function esc(v) {
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;');
+}
+
+function optimizePosterUrl(url, targetWidth = 342) {
+  if (!url || typeof url !== 'string') return '';
+  if (url.includes('image.tmdb.org/t/p/')) {
+    return url.replace(/\/t\/p\/(w\d+|original)\//, `/t/p/w${targetWidth}/`);
+  }
+  return url;
 }
 
 function showToast(message) {
@@ -150,9 +161,214 @@ function contrastOnHex(hex) {
   return lum > 0.58 ? '#111111' : '#FFFFFF';
 }
 
+const ratingProviders = {
+  imdb: 'IMDb', tmdb: 'TMDB', tomatoes: 'Rotten Tomatoes', audience: 'Público (RT)',
+  metacritic: 'Metacritic', trakt: 'Trakt', letterboxd: 'Letterboxd', mal: 'MyAnimeList',
+};
+document.getElementById('rating-providers').innerHTML = Object.entries(ratingProviders)
+  .map(([key, label]) => `<label><input type="checkbox" data-provider="${key}" /> ${label}</label>`).join('');
+
+function discordActivity() {
+  const prefs = appSettings?.services;
+  if (!prefs?.discord_enabled) return null;
+  const type = prefs.discord_style === 'playing' ? 0 : 3;
+  const view = document.querySelector('.view.active')?.id;
+  if (view === 'view-player') {
+    const ctx = activePlayerCtx;
+    if (!ctx?.latestState?.active || ctx.latestState.ended) return null;
+    const episode = ctx.episode != null && prefs.episode_name
+      ? [`T${ctx.season ?? 1} E${ctx.episode}`, ctx.episodeTitle].filter(Boolean).join(' · ') : '';
+    const status = ctx.latestState.paused ? 'Pausado' : 'Assistindo';
+    const assets = {};
+    if (/^https?:\/\//i.test(ctx.poster || '')) {
+      assets.large_image = prefs.portrait
+        ? `https://wsrv.nl/?${new URLSearchParams({url: ctx.poster, w: 512, h: 512, fit: 'contain', cbg: 'black'})}` : ctx.poster;
+    }
+    if (prefs.episode_image && ctx.episode != null && /^https?:\/\//i.test(ctx.episodeThumbnail || '')) {
+      assets.small_image = ctx.episodeThumbnail;
+    }
+    const timestamps = !ctx.latestState.paused && ctx.discordStart
+      ? { start: ctx.discordStart } : undefined;
+    return { type, timestamps, details: (ctx.title || 'Nuvio').slice(0, 120),
+      state: (episode ? (ctx.latestState.paused ? `Pausado · ${episode}` : episode) : status).slice(0, 120), assets };
+  }
+  if (view !== 'view-app' || prefs.discord_scope === 'playback') return null;
+  const tab = activeTabName();
+  const section = {home: 'Início', search: 'Busca', discover: 'Catálogos', library: 'Biblioteca',
+    settings: 'Ajustes', streams: 'Fontes', catalog: 'Catálogo', details: activeMetaContext?.name || 'Detalhes'};
+  return { type, details: `Navegando · ${section[tab] || 'Nuvio'}`.slice(0, 120) };
+}
+
+let sentPresence = 'null';
+let sendingPresence = false;
+let discordConnected = false;
+let discordStatusText = '';
+function setDiscordStatus(text, connected = false) {
+  discordConnected = Boolean(connected);
+  if (text === discordStatusText) return;
+  discordStatusText = text;
+  const el = document.getElementById('discord-presence-status');
+  if (el) el.textContent = text;
+}
+
+function renderDiscordReport(report, { showDetails = false } = {}) {
+  if (!report) return;
+  console.info('[discord]', report);
+  const el = document.getElementById('discord-diagnostic');
+  if (!el) return;
+  const lines = [];
+  const sockets = Array.isArray(report.sockets) ? report.sockets : [];
+  lines.push(sockets.length ? `Canais discord-ipc encontrados: ${sockets.length}` : 'Canais discord-ipc encontrados: nenhum');
+  sockets.forEach((path) => lines.push(`  ${path}`));
+  if (report.endpoint) lines.push(`Canal usado: ${report.endpoint}`);
+  if (report.handshake) lines.push(`Handshake: ${report.handshake}`);
+  if (report.activity) lines.push(`Atividade: ${report.activity}`);
+  if (Array.isArray(report.details) && report.details.length) {
+    lines.push('', 'Passos:');
+    report.details.forEach((line) => lines.push(`  ${line}`));
+  }
+  el.textContent = lines.join('\n');
+  if (showDetails) el.hidden = false;
+}
+
+async function syncDiscord(force = false) {
+  if (sendingPresence || !appSettings) return;
+  sendingPresence = true;
+  try {
+    if (!appSettings.services?.discord_enabled) {
+      if (sentPresence !== 'null') {
+        sentPresence = 'null';
+        await invoke('discord_presence', { activity: null }).catch(() => {});
+      }
+      setDiscordStatus('Desativada.', false);
+      return;
+    }
+    let activity = discordActivity();
+    let key = JSON.stringify(activity);
+    let report = null;
+    while (key !== sentPresence || (force && activity)) {
+      report = await invoke('discord_presence', { activity });
+      sentPresence = key;
+      force = false;
+      if (!report?.ok) break;
+      activity = discordActivity();
+      key = JSON.stringify(activity);
+    }
+    if (report && !report.ok) {
+      sentPresence = 'null';
+      renderDiscordReport(report, { showDetails: true });
+      setDiscordStatus(report.message || 'Não foi possível publicar a presença no Discord.', false);
+      return;
+    }
+    if (report) renderDiscordReport(report);
+    setDiscordStatus(
+      sentPresence === 'null'
+        ? 'Conectado ao Discord — sem atividade no momento.'
+        : `Conectado ao Discord — ${report?.activity || 'exibindo sua atividade'}.`,
+      true,
+    );
+  } catch (error) {
+    sentPresence = 'null';
+    setDiscordStatus(`Falha ao chamar o conector do Discord: ${String(error)}`, false);
+  } finally {
+    sendingPresence = false;
+  }
+}
+// Refresh connected sessions every 30s and retry disconnected sessions faster (every 8s) so opening Discord connects quickly.
+setInterval(() => {
+  if (appSettings?.services?.discord_enabled && !discordConnected) syncDiscord(true);
+}, 8000);
+setInterval(() => syncDiscord(true), 30000);
+
+function renderRuntimeMetrics(metrics) {
+  const el = document.getElementById('runtime-metrics');
+  if (!el || !metrics) return;
+  console.info('[metrics]', metrics);
+  const lines = [];
+  lines.push(metrics.debugBuild
+    ? 'Build: depuração (CPU e memória bem acima da release)'
+    : 'Build: release');
+  (metrics.processes || []).forEach((proc) => {
+    const label = proc.pid === metrics.appPid ? `${proc.name} (app)` : proc.name;
+    lines.push(`${label} · pid ${proc.pid} · ${proc.rssMb.toFixed(1)} MB (pico ${proc.peakMb.toFixed(1)} MB) · ${proc.cpuPercent.toFixed(1)}% CPU · ${proc.threads} threads`);
+  });
+  lines.push('', `Total: ${metrics.totalRssMb.toFixed(1)} MB · ${metrics.totalCpuPercent.toFixed(1)}% CPU`);
+  const player = metrics.player;
+  if (player) {
+    const size = player.width && player.height ? `${player.width}x${player.height}` : 'resolução desconhecida';
+    const fps = player.fps ? ` @ ${player.fps.toFixed(2)} fps` : '';
+    lines.push(`Player: hwdec=${player.hwdecCurrent || 'desconhecido'} · ${player.videoCodec || '?'} ${player.pixelFormat || ''}`.trim() + ` · ${size}${fps} · cache ${Number(player.cacheSecs || 0).toFixed(1)} s · frames perdidos ${player.droppedFrames || 0}`);
+  } else {
+    lines.push('Player: nenhuma reprodução ativa.');
+  }
+  const growth = metrics.growth;
+  if (growth && growth.samples > 1) {
+    const sign = (value) => `${value >= 0 ? '+' : ''}${value.toFixed(1)}`;
+    lines.push('', `Sessão monitorada: ${growth.firstSampleAgeMinutes.toFixed(0)} min (${growth.samples} amostras)`);
+    lines.push(`Variação: total ${sign(growth.totalGrowthMb)} MB · app ${sign(growth.appGrowthMb)} MB · WebKit ${sign(growth.webkitGrowthMb)} MB`);
+    if (growth.recentMb?.length > 3) {
+      const max = Math.max(...growth.recentMb);
+      const points = growth.recentMb.map((v) => Math.round((v / max) * 8));
+      lines.push(`Curva (min→agora): ${points.map((n) => '▁▂▃▄▅▆▇█'[Math.min(7, n)]).join('')}`);
+    }
+    if (growth.totalGrowthMb > 150) {
+      lines.push('Atenção: a memória subiu mais de 150 MB nesta sessão — envie esta medição junto do relato.');
+    }
+  } else {
+    lines.push('', 'Monitor de memória: coletando a primeira amostra (a cada 10 s).');
+  }
+  if (metrics.note) lines.push('', metrics.note);
+  el.textContent = lines.join('\n');
+  el.hidden = false;
+}
+
+document.getElementById('btn-runtime-metrics')?.addEventListener('click', async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  button.textContent = 'Medindo…';
+  try {
+    renderRuntimeMetrics(await invoke('runtime_metrics'));
+  } catch (error) {
+    const el = document.getElementById('runtime-metrics');
+    if (el) {
+      el.textContent = `Falha ao medir: ${String(error)}`;
+      el.hidden = false;
+    }
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Medir agora';
+  }
+});
+
+document.getElementById('btn-discord-connect')?.addEventListener('click', async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  button.textContent = 'Conectando…';
+  try {
+    const toggle = document.querySelector('[data-service="discord_enabled"]');
+    if (toggle && !toggle.checked) {
+      toggle.checked = true;
+      const services = readServicesFromForm();
+      await persistSettingsPatch({ services });
+    }
+    sentPresence = 'null';
+    await syncDiscord(true);
+    if (discordConnected) {
+      showToast('Conectado ao Discord!');
+    } else {
+      showToast('Abra o Discord (ou arRPC) no PC para conectar.');
+    }
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Conectar agora';
+  }
+});
+
 function showView(id) {
+  if (id === "view-auth" || id === "view-profiles") clearConnectedSession();
   document.querySelectorAll('.view').forEach((v) => v.classList.remove('active'));
   document.getElementById(id).classList.add('active');
+  syncDiscord();
 }
 
 function activeTabName() {
@@ -161,7 +377,7 @@ function activeTabName() {
 
 function setTab(tab) {
   const cur = activeTabName();
-  if (cur && cur !== 'details' && cur !== 'streams' && cur !== 'catalog') {
+  if (cur && cur !== 'details' && cur !== 'streams' && cur !== 'catalog' && cur !== 'insights') {
     previousTab = cur;
   }
   hideHoverPreview();
@@ -172,9 +388,15 @@ function setTab(tab) {
   document.querySelectorAll('.tab-panel').forEach((p) => {
     p.classList.toggle('active', p.id === `tab-${tab}`);
   });
+  if (tab !== 'streams' && !playerActive && partyLive.active) {
+    reportPartyPlayerStatus('browsing', '');
+  }
+  syncDiscord();
   mainViewportEl.scrollTo({ top: 0 });
-  if (tab === 'library') refreshLibrary();
+  if (tab === 'library') { refreshLibrary(); renderFollowingSection(); }
   if (tab === 'search') renderRecentSearches();
+  if (tab === 'discover') syncDiscoverSelection();
+  if (tab === 'insights' && typeof loadProfileInsights === 'function') loadProfileInsights();
 }
 
 function handleBackNavigation() {
@@ -197,6 +419,10 @@ function handleBackNavigation() {
   const cur = activeTabName();
   if (cur === 'streams') {
     setTab(activeMetaContext ? 'details' : (previousTab || 'home'));
+  } else if (cur === 'person') {
+    setTab(activeMetaContext ? 'details' : (previousTab || 'home'));
+  } else if (cur === 'insights') {
+    setTab(previousTab || 'settings');
   } else if (cur === 'details' || cur === 'catalog') {
     setTab(previousTab || 'home');
   }
@@ -385,6 +611,8 @@ async function handleAuthenticated(status) {
 async function switchToProfile(idx, fromPicker) {
   if (switchingProfile) return;
   switchingProfile = true;
+  if (libraryCollections) libraryCollections.open = false;
+  clearAccountCollections();
   document.getElementById('profile-switcher-stack')?.classList.add('hidden');
   authState.active_profile_index = idx;
   if (fromPicker) {
@@ -394,11 +622,14 @@ async function switchToProfile(idx, fromPicker) {
   updateAccountSettingsUi();
   document.getElementById('home-catalogs-container').innerHTML = '';
   document.getElementById('home-cw-container').classList.add('hidden');
+  if (typeof clearHomeCollections === 'function') clearHomeCollections();
   try {
     await invoke('select_profile', { profileIndex: idx });
+    await simklLoadProfile();
     await Promise.all([
       refreshWatchedKeys(),
       refreshLibraryState(),
+      refreshFollowedPeople(),
       refreshAddons(),
       refreshPluginsState(),
       refreshContinueWatching(),
@@ -429,24 +660,42 @@ function renderProfilePicker(profiles) {
 }
 
 document.getElementById('btn-profiles-signout').addEventListener('click', async () => {
+  ++simklGeneration;
+  simklAccount = {};
   await invoke('sign_out');
   showView('view-auth');
 });
 
 async function enterMainApp(status) {
+  if (libraryCollections) libraryCollections.open = false;
+  clearAccountCollections();
   authState = status;
   showView('view-app');
   updateProfileUi();
   updateAccountSettingsUi();
+  if (status.signed_in && status.active_profile_index != null) {
+    try {
+      await invoke('select_profile', { profileIndex: status.active_profile_index });
+    } catch (error) {
+      console.error('Falha ao sincronizar os addons do perfil', error);
+    }
+  }
+  await simklLoadProfile();
   await Promise.all([
     refreshWatchedKeys(),
     refreshLibraryState(),
+    refreshFollowedPeople(),
     refreshAddons(),
     refreshPluginsState(),
     refreshContinueWatching(),
     refreshHomeProgressive(),
     refreshDiagnostics(),
   ]);
+  if (appSettings?.services?.discord_enabled) {
+    syncDiscord(true);
+    setTimeout(() => syncDiscord(true), 3000);
+    setTimeout(() => syncDiscord(true), 8000);
+  }
 }
 
 function updateProfileUi() {
@@ -502,7 +751,7 @@ document.querySelectorAll('.sidebar-item, .topnav-item').forEach((btn) => {
 // --- WATCHED & LIBRARY STATE ---
 async function refreshWatchedKeys() {
   try {
-    const keys = await invoke('list_watched_keys');
+    const keys = simklUses('progress') ? simklWatchedKeys() : await invoke('list_watched_keys');
     watchedSet = new Set(keys || []);
   } catch {
     // Non-fatal
@@ -511,9 +760,16 @@ async function refreshWatchedKeys() {
 
 async function refreshLibraryState() {
   try {
-    const items = await invoke('pull_account_library');
+    const items = simklUses('library') ? simklLibrary() : await invoke('pull_account_library');
     libraryRawItems = Array.isArray(items) ? items : [];
     librarySet = new Set(libraryRawItems.map((it) => libKey(it.content_id || it.id, it.content_type || it.type)));
+    if (simklUses('library')) {
+      for (const item of libraryRawItems) {
+        for (const [source,id] of Object.entries(item.media.ids || {})) {
+          if (id && source !== 'slug') librarySet.add(libKey(source === 'imdb' ? id : source + ':' + id, item.content_type));
+        }
+      }
+    }
   } catch {
     libraryRawItems = [];
   }
@@ -532,13 +788,33 @@ async function toggleItemLibrary(meta) {
     imdb_rating: meta.imdb_rating || meta.imdbRating || null,
     added_at: Date.now(),
   };
-  const saved = await invoke('toggle_library_item', { item: payload });
+  let saved;
+  if (simklUses('library')) {
+    saved = !librarySet.has(libKey(meta.id,meta.type));
+    if (!saved && !(await confirmDialog('Remover do Simkl?', 'O Simkl também removerá o histórico deste título ao retirá-lo da sua lista.'))) return true;
+    try { await simklMutate(saved ? 'library_add' : 'remove', meta.id, meta.type, saved ? {to:'plantowatch'} : {}); }
+    catch(e) {showToast(String(e)); return !saved;}
+  } else {
+    saved = await invoke('toggle_library_item', { item: payload });
+  }
   await refreshLibraryState();
   showToast(saved ? 'Adicionado à Biblioteca' : 'Removido da Biblioteca');
   return saved;
 }
 
 async function toggleItemWatched(contentId, contentType, title, season = null, episode = null) {
+  if (simklUses('progress')) {
+    const key = epWatchKey(contentId,season,episode);
+    const watched = !watchedSet.has(key);
+    const fields = season != null && episode != null
+      ? {seasons:[{number:season, episodes:[{number:episode}]}], ...(simklFindEntry(contentId)?.bucket === 'anime' ? {use_tvdb_anime_seasons:true} : {})}
+      : watched && contentType === 'series' ? {status:'completed'} : {};
+    try {
+      await simklMutate(watched ? 'history_add' : 'history_remove', contentId,contentType,fields);
+      await refreshWatchedKeys();
+      return watched;
+    } catch(e) {showToast(String(e)); return !watched;}
+  }
   const watched = await invoke('toggle_watched_item', {
     contentId,
     contentType: contentType || 'movie',
@@ -712,6 +988,11 @@ async function refreshContinueWatching() {
   wrap.classList.add('hidden');
   wrap.innerHTML = '';
 
+  if (simklUses('progress')) {
+    simklProgressCards().forEach((card, index) => cwItemsMap.set(index,card));
+    renderContinueWatchingRow();
+    return;
+  }
   cwUnlistenItem = await listen('home:continue-watching-item', (event) => {
     const { order, card } = event.payload;
     cwItemsMap.set(order, card);
@@ -754,7 +1035,8 @@ function renderContinueWatchingRow() {
           subParts.push(c.content_type === 'series' ? 'Série' : 'Filme');
         }
         if (c.episode_title) subParts.push(c.episode_title);
-        const imgUrl = style === 'poster' ? (c.poster || c.artwork || '') : (c.artwork || c.poster || '');
+        const rawImg = style === 'poster' ? (c.poster || c.artwork || '') : (c.artwork || c.poster || '');
+        const imgUrl = optimizePosterUrl(rawImg, style === 'poster' ? 342 : 500);
         const blurred = appSettings?.blur_unwatched_episodes && c.season != null ? 'blurred-img' : '';
         return `
           <button class="cw-card ${styleClass}" data-cw-idx="${idx}">
@@ -821,6 +1103,11 @@ function renderContinueWatchingRow() {
           label: 'Remover de Continuar Assistindo',
           danger: true,
           onClick: async () => {
+            if (simklUses('progress')) {
+              try {await simklRequest('remove_progress', c.simkl_session); await simklSync(); await refreshContinueWatching();}
+              catch(e) {showToast(String(e));}
+              return;
+            }
             await invoke('remove_watch_progress', { progressKey });
             cwItemsMap.forEach((val, key) => {
               if (val.content_id === c.content_id) cwItemsMap.delete(key);
@@ -845,6 +1132,7 @@ async function refreshHomeProgressive() {
   heroItems = [];
   heroIdx = 0;
   shelvesContainer.innerHTML = '<div class="muted" id="home-loading-note">Carregando catálogos…</div>';
+  if (typeof refreshHomeCollections === 'function') refreshHomeCollections();
 
   homeUnlistenSection = await listen('home:section', (event) => {
     const sec = event.payload;
@@ -898,6 +1186,7 @@ function appendShelfOrdered(shelvesContainer, sec, sectionsMap = homeSectionsMap
   const wrapper = document.createElement('div');
   wrapper.className = 'shelf-section';
   wrapper.dataset.order = String(sec.order);
+  const previewItems = sec.searchQuery ? sec.items.slice(0, 20) : sec.items;
   wrapper.innerHTML = `
     <div class="shelf-header">
       <button class="shelf-title-btn" data-open-order="${sec.order}">
@@ -909,7 +1198,7 @@ function appendShelfOrdered(shelvesContainer, sec, sectionsMap = homeSectionsMap
       </button>
     </div>
     <div class="shelf-row">
-      ${sec.items.map((item) => renderPosterCard(item)).join('')}
+      ${previewItems.map((item) => renderPosterCard(item)).join('')}
     </div>
   `;
 
@@ -946,25 +1235,30 @@ function wireHorizontalShelfDrag(container) {
     let lastTs = 0;
     let velocity = 0;
     let flingRaf = 0;
+    let moveRaf = 0;
+    let pendingDx = 0;
 
     const stopFling = () => {
       if (flingRaf) {
         cancelAnimationFrame(flingRaf);
         flingRaf = 0;
       }
+      row.classList.remove('is-scrolling');
     };
 
     const startFling = () => {
       stopFling();
       if (Math.abs(velocity) < 0.4) return;
+      row.classList.add('is-scrolling');
       let prev = performance.now();
+      const maxScroll = Math.max(0, row.scrollWidth - row.clientWidth);
       const step = (now) => {
         const dt = Math.min(32, Math.max(4, now - prev));
         prev = now;
         row.scrollLeft += velocity * (dt / 16.67);
         velocity *= Math.pow(0.92, dt / 16.67);
-        if (Math.abs(velocity) < 0.35 || row.scrollLeft <= 0 || row.scrollLeft >= row.scrollWidth - row.clientWidth) {
-          flingRaf = 0;
+        if (Math.abs(velocity) < 0.35 || row.scrollLeft <= 0 || row.scrollLeft >= maxScroll) {
+          stopFling();
           return;
         }
         flingRaf = requestAnimationFrame(step);
@@ -977,6 +1271,11 @@ function wireHorizontalShelfDrag(container) {
     row.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
       stopFling();
+      if (moveRaf) {
+        cancelAnimationFrame(moveRaf);
+        moveRaf = 0;
+      }
+      pendingDx = 0;
       tracking = true;
       locked = null;
       pointerId = e.pointerId;
@@ -1010,10 +1309,18 @@ function wireHorizontalShelfDrag(container) {
       const now = performance.now();
       const stepDx = e.clientX - lastX;
       const dt = Math.max(1, now - lastTs);
-      row.scrollLeft -= stepDx;
       velocity = (-stepDx / dt) * 16.67 * 0.75 + velocity * 0.25;
       lastX = e.clientX;
       lastTs = now;
+
+      pendingDx += stepDx;
+      if (!moveRaf) {
+        moveRaf = requestAnimationFrame(() => {
+          row.scrollLeft -= pendingDx;
+          pendingDx = 0;
+          moveRaf = 0;
+        });
+      }
     });
 
     const endDrag = (e) => {
@@ -1023,6 +1330,14 @@ function wireHorizontalShelfDrag(container) {
       tracking = false;
       locked = null;
       row.classList.remove('dragging');
+      if (moveRaf) {
+        cancelAnimationFrame(moveRaf);
+        moveRaf = 0;
+        if (pendingDx !== 0) {
+          row.scrollLeft -= pendingDx;
+          pendingDx = 0;
+        }
+      }
       try {
         if (row.hasPointerCapture(pointerId)) row.releasePointerCapture(pointerId);
       } catch {}
@@ -1039,7 +1354,10 @@ function wireHorizontalShelfDrag(container) {
     row.addEventListener(
       'wheel',
       (e) => {
-        if (e.shiftKey && Math.abs(e.deltaY) > 0) {
+        if (Math.abs(e.deltaX) > 0) {
+          stopFling();
+          row.scrollLeft += e.deltaX;
+        } else if (e.shiftKey && Math.abs(e.deltaY) > 0) {
           stopFling();
           e.preventDefault();
           row.scrollLeft += e.deltaY;
@@ -1057,11 +1375,13 @@ async function openFullCatalog(sec) {
     catalogId: sec.catalog_id,
     title: sec.title,
     addonName: sec.addon_name,
+    genre: sec.genre || null,
     searchQuery: sec.searchQuery || null,
     items: [...(sec.items || [])],
   };
   document.getElementById('catalog-page-title').textContent = sec.title;
   document.getElementById('catalog-page-sub').textContent = sec.addon_name;
+  document.getElementById('catalog-full-status').textContent = '';
   setTab('catalog');
   renderFullCatalogGrid();
   document.getElementById('btn-catalog-load-more').classList.toggle('hidden', activeCatalog.items.length < 10);
@@ -1077,6 +1397,10 @@ document.getElementById('btn-catalog-back').addEventListener('click', () => setT
 
 document.getElementById('btn-catalog-load-more').addEventListener('click', async () => {
   if (!activeCatalog) return;
+  if (activeCatalog.sources) {
+    if (typeof loadMoreCollectionFolder === 'function') await loadMoreCollectionFolder();
+    return;
+  }
   const btn = document.getElementById('btn-catalog-load-more');
   const status = document.getElementById('catalog-full-status');
   btn.disabled = true;
@@ -1087,7 +1411,7 @@ document.getElementById('btn-catalog-load-more').addEventListener('click', async
       mediaType: activeCatalog.mediaType,
       catalogId: activeCatalog.catalogId,
       skip: activeCatalog.items.length,
-      genre: null,
+      genre: activeCatalog.genre,
       search: activeCatalog.searchQuery || null,
     });
     if (!more.length) {
@@ -1110,16 +1434,84 @@ document.getElementById('btn-catalog-load-more').addEventListener('click', async
 
 function renderPosterCard(item) {
   const watched = watchedSet.has(item.id);
+  const posterSrc = optimizePosterUrl(item.poster);
   return `
     <button class="poster-card" data-meta-id="${esc(item.id)}" data-meta-type="${esc(item.type)}" data-meta-name="${esc(item.name)}" data-meta-poster="${esc(item.poster || '')}" data-meta-banner="${esc(item.banner || '')}" data-meta-logo="${esc(item.logo || '')}" data-meta-desc="${esc(item.description || '')}" data-meta-release="${esc(item.release_info || '')}" data-meta-imdb="${esc(item.imdb_rating || '')}">
       <div class="poster-img-wrap">
-        ${item.poster ? `<img src="${esc(item.poster)}" alt="${esc(item.name)}" loading="lazy" decoding="async" draggable="false" />` : ''}
+        ${item.poster ? `<img src="${esc(posterSrc)}" alt="${esc(item.name)}" loading="lazy" decoding="async" draggable="false" />` : ''}
         ${watched ? '<span class="watched-badge" title="Assistido">&#10003;</span>' : ''}
       </div>
       <div class="poster-name">${esc(item.name)}</div>
-      <div class="poster-sub">${esc(item.release_info || item.type || '')}</div>
+      ${item.release_info ? `<div class="poster-sub">${esc(item.release_info)}</div>` : ''}
     </button>
   `;
+}
+
+const heroBackdropCache = new Map();
+const heroBackdropPending = new Set();
+const metaDetailsCache = new Map();
+const metaDetailsPending = new Map();
+
+function getCachedMetaDetails(mediaType, id) {
+  if (!id) return null;
+  return metaDetailsCache.get(`${mediaType || 'movie'}:${id}`) || null;
+}
+
+function cacheMetaDetails(mediaType, id, meta) {
+  if (!id || !meta || typeof meta !== 'object') return;
+  const key = `${mediaType || 'movie'}:${id}`;
+  if (metaDetailsCache.has(key)) metaDetailsCache.delete(key);
+  metaDetailsCache.set(key, meta);
+  while (metaDetailsCache.size > 50) {
+    const oldest = metaDetailsCache.keys().next().value;
+    if (!oldest) break;
+    metaDetailsCache.delete(oldest);
+  }
+}
+
+function fetchMetaDetailsCached(mediaType, id) {
+  const key = `${mediaType || 'movie'}:${id}`;
+  const cached = metaDetailsCache.get(key);
+  if (cached) return Promise.resolve(cached);
+  if (metaDetailsPending.has(key)) return metaDetailsPending.get(key);
+  const req = invoke('fetch_meta_details', { mediaType, id })
+    .then((meta) => {
+      cacheMetaDetails(mediaType, id, meta);
+      return meta;
+    })
+    .finally(() => metaDetailsPending.delete(key));
+  metaDetailsPending.set(key, req);
+  return req;
+}
+
+function applyHeroBackdrop(itemId, url) {
+  const cur = heroItems[heroIdx % (heroItems.length || 1)];
+  if (!cur || cur.id !== itemId || !url) return;
+  const frame = document.querySelector('#home-hero-container .hero-frame');
+  if (!frame) return;
+  let img = frame.querySelector('.hero-bg');
+  if (!img) {
+    img = document.createElement('img');
+    img.className = 'hero-bg';
+    img.alt = '';
+    frame.insertBefore(img, frame.firstChild);
+  }
+  if (img.getAttribute('src') !== url) img.src = url;
+}
+
+function prefetchHeroBackdrops() {
+  heroItems.forEach((item) => {
+    if (!item?.id || heroBackdropCache.has(item.id) || heroBackdropPending.has(item.id)) return;
+    heroBackdropPending.add(item.id);
+    fetchMetaDetailsCached(item.type, item.id)
+      .then((meta) => {
+        const url = meta?.background || meta?.banner || '';
+        heroBackdropCache.set(item.id, url);
+        applyHeroBackdrop(item.id, url);
+      })
+      .catch(() => heroBackdropCache.set(item.id, ''))
+      .finally(() => heroBackdropPending.delete(item.id));
+  });
 }
 
 function renderHero() {
@@ -1131,7 +1523,9 @@ function renderHero() {
   }
   const draw = () => {
     const item = heroItems[heroIdx % heroItems.length];
-    const bg = item.banner || item.poster || '';
+    // Same horizontal backdrop the details screen uses; never stretch a vertical poster.
+    const cachedBackdrop = heroBackdropCache.get(item.id);
+    const bg = cachedBackdrop || item.banner || (cachedBackdrop === '' ? item.poster : '') || '';
     const genres = Array.isArray(item.genres) ? item.genres : [];
     container.innerHTML = `
       <div class="hero-frame">
@@ -1161,6 +1555,7 @@ function renderHero() {
         </div>
       </div>
     `;
+    populateHeroRatings(container.querySelector('.hero-meta-row'), item);
     document.getElementById('btn-hero-details').addEventListener('click', () => openDetailsPage(item));
     document.getElementById('btn-hero-open-circle').addEventListener('click', () => openDetailsPage(item));
     container.querySelectorAll('[data-hero-dot]').forEach((dot) => {
@@ -1171,6 +1566,7 @@ function renderHero() {
     });
   };
   draw();
+  prefetchHeroBackdrops();
   heroTimer = setInterval(() => {
     heroIdx = (heroIdx + 1) % heroItems.length;
     draw();
@@ -1198,6 +1594,17 @@ function wirePosterInteractions(_root) {
   posterDelegationReady = true;
 
   mainViewportEl.addEventListener('click', (e) => {
+    if (e.target.closest('[data-unfollow-key]')) return;
+    const castCard = e.target.closest('.cast-portrait-card[data-person-name], .following-person-card[data-person-name]');
+    if (castCard) {
+      hideHoverPreview();
+      openPersonPage({
+        id: castCard.dataset.personId,
+        name: castCard.dataset.personName || '',
+        photo: castCard.dataset.personPhoto || '',
+      });
+      return;
+    }
     const card = e.target.closest('.poster-card');
     if (!card) return;
     const shelfRow = card.closest('.shelf-row');
@@ -1206,17 +1613,40 @@ function wirePosterInteractions(_root) {
     openDetailsPage(cardToItem(card));
   });
 
+  mainViewportEl.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    if (e.target.closest('[data-unfollow-key]')) return;
+    const castCard = e.target.closest('.cast-portrait-card[data-person-name], .following-person-card[data-person-name]');
+    if (!castCard) return;
+    e.preventDefault();
+    openPersonPage({
+      id: castCard.dataset.personId,
+      name: castCard.dataset.personName || '',
+      photo: castCard.dataset.personPhoto || '',
+    });
+  });
+
   mainViewportEl.addEventListener('contextmenu', (e) => {
-    const card = e.target.closest('.poster-card');
+    const card = e.target.closest('.poster-card:not(.following-person-card)');
     if (!card) return;
     e.preventDefault();
     openPosterContextMenu(cardToItem(card));
   });
 
+  let hoverPrefetchTimer = null;
   mainViewportEl.addEventListener('pointerover', (e) => {
+    const card = e.target.closest('.poster-card:not(.following-person-card)');
+    if (card?.dataset.metaId && card?.dataset.metaType) {
+      clearTimeout(hoverPrefetchTimer);
+      const { metaType, metaId } = card.dataset;
+      hoverPrefetchTimer = setTimeout(() => {
+        fetchMetaDetailsCached(metaType, metaId).catch(() => {});
+      }, 180);
+    }
     if (!appSettings?.hover_preview_enabled) return;
-    const card = e.target.closest('.poster-card');
     if (!card || card === hoverActiveCard) return;
+    const shelfRow = card.closest('.shelf-row');
+    if (shelfRow && (shelfRow.classList.contains('dragging') || shelfRow.classList.contains('is-scrolling'))) return;
     hoverActiveCard = card;
     clearTimeout(hoverPreviewTimer);
     const item = cardToItem(card);
@@ -1233,55 +1663,741 @@ function wirePosterInteractions(_root) {
     if (!card || (e.relatedTarget && card.contains(e.relatedTarget))) return;
     if (hoverActiveCard === card) hoverActiveCard = null;
     clearTimeout(hoverPreviewTimer);
+    clearTimeout(hoverPrefetchTimer);
     setTimeout(() => {
       if (!hoverPopupEl.matches(':hover') && !hoverActiveCard) hideHoverPreview();
     }, 120);
   });
 }
 
+// --- FULL-SCREEN PERSON (ACTOR) SCREEN ---
+let activePersonContext = null;
+const _followedHydrating = new Set();
+
+function normalizeFollowedPerson(raw) {
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    return /^\d+$/.test(trimmed)
+      ? { id: trimmed, name: '', photo: '', role: '' }
+      : { id: '', name: trimmed, photo: '', role: '' };
+  }
+  if (!raw || typeof raw !== 'object') return null;
+  const id = String(raw.id || '').trim();
+  const name = String(raw.name || '').trim();
+  if (!id && !name) return null;
+  return {
+    id,
+    name,
+    photo: String(raw.photo || '').trim(),
+    role: String(raw.role || '').trim(),
+  };
+}
+
+function sameFollowedPerson(a, b) {
+  if (!a || !b) return false;
+  if (a.id && b.id && String(a.id) === String(b.id)) return true;
+  if (a.name && b.name && a.name.toLowerCase() === b.name.toLowerCase()) return true;
+  return false;
+}
+
+function dedupeFollowedList(items) {
+  const out = [];
+  for (const raw of items || []) {
+    const entry = normalizeFollowedPerson(raw);
+    if (!entry) continue;
+    const idx = out.findIndex((existing) => sameFollowedPerson(existing, entry));
+    if (idx === -1) {
+      out.push(entry);
+    } else {
+      out[idx] = {
+        id: out[idx].id || entry.id,
+        name: out[idx].name || entry.name,
+        photo: out[idx].photo || entry.photo,
+        role: out[idx].role || entry.role,
+      };
+    }
+  }
+  return out;
+}
+
+const _fpStored = (() => {
+  try {
+    return JSON.parse(localStorage.getItem('nuvio_followed_people') || '[]');
+  } catch {
+    return [];
+  }
+})();
+let followedPeopleList = dedupeFollowedList(_fpStored);
+
+function saveFollowedPeopleLocal() {
+  try {
+    localStorage.setItem('nuvio_followed_people', JSON.stringify(followedPeopleList));
+  } catch {}
+}
+
+function persistFollowedPeople() {
+  saveFollowedPeopleLocal();
+  invoke('save_followed_people', { people: followedPeopleList }).catch(() => {});
+}
+
+function findFollowedIndex(person) {
+  const target = normalizeFollowedPerson(person);
+  if (!target) return -1;
+  return followedPeopleList.findIndex((item) => sameFollowedPerson(item, target));
+}
+
+function isPersonFollowed(person) {
+  return findFollowedIndex(person) !== -1;
+}
+
+function toggleFollowPerson(person) {
+  const entry = normalizeFollowedPerson(person);
+  if (!entry) return false;
+  const idx = findFollowedIndex(entry);
+  if (idx !== -1) {
+    followedPeopleList.splice(idx, 1);
+    persistFollowedPeople();
+    return false;
+  }
+  followedPeopleList.unshift(entry);
+  persistFollowedPeople();
+  return true;
+}
+
+function syncFollowedPersonMeta(person) {
+  const entry = normalizeFollowedPerson(person);
+  if (!entry) return;
+  const idx = findFollowedIndex(entry);
+  if (idx === -1) return;
+  const cur = followedPeopleList[idx];
+  const next = {
+    id: entry.id || cur.id,
+    name: entry.name || cur.name,
+    photo: entry.photo || cur.photo,
+    role: entry.role || cur.role,
+  };
+  if (
+    next.id !== cur.id ||
+    next.name !== cur.name ||
+    next.photo !== cur.photo ||
+    next.role !== cur.role
+  ) {
+    followedPeopleList[idx] = next;
+    persistFollowedPeople();
+  }
+}
+
+async function refreshFollowedPeople() {
+  let dbList = [];
+  try {
+    dbList = await invoke('list_followed_people');
+  } catch {}
+  const localList = (() => {
+    try {
+      return JSON.parse(localStorage.getItem('nuvio_followed_people') || '[]');
+    } catch {
+      return [];
+    }
+  })();
+  const merged = dedupeFollowedList([...(Array.isArray(dbList) ? dbList : []), ...localList]);
+  followedPeopleList = merged;
+  saveFollowedPeopleLocal();
+  if (merged.length && JSON.stringify(merged) !== JSON.stringify(dbList || [])) {
+    invoke('save_followed_people', { people: merged }).catch(() => {});
+  }
+  if (activeTabName() === 'library') renderFollowingSection();
+}
+
+async function hydrateMissingFollowedPhotos() {
+  const pending = followedPeopleList.filter((p) => (!p.photo || !p.name) && !_followedHydrating.has(p.id || p.name));
+  if (!pending.length) return;
+  let updated = false;
+  for (const p of pending) {
+    const hydKey = p.id || p.name;
+    _followedHydrating.add(hydKey);
+    try {
+      const data = await invoke('person_details', {
+        personId: Number(p.id) || null,
+        name: p.name || null,
+      });
+      if (data && (data.name || data.profile || data.id)) {
+        syncFollowedPersonMeta({
+          id: String(data.id || p.id || ''),
+          name: data.name || p.name || '',
+          photo: data.profile || p.photo || '',
+          role: personRoleLabel(data),
+        });
+        updated = true;
+      }
+    } catch {
+      // TMDB key absent or network failure; leave placeholder intact
+    }
+  }
+  if (updated && activeTabName() === 'library') {
+    renderFollowingSection();
+  }
+}
+
+const notifiedPeople = new Set();
+let personUi = { tab: 'filmography', type: 'all', sort: 'date', view: 'grid' };
+
+const PP_ICONS = {
+  back: '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M15.41 7.41L14 6l-6 6l6 6l1.41-1.41L10.83 12z"/></svg>',
+  plus: '<svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>',
+  check: '<svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M9 16.17L4.83 12l-1.42 1.41L9 19L21 7l-1.41-1.41z"/></svg>',
+  bell: '<svg viewBox="0 0 24 24" width="19" height="19"><path fill="currentColor" d="M12 22a2 2 0 0 0 2-2h-4a2 2 0 0 0 2 2m6-6V11c0-3.07-1.64-5.64-4.5-6.32V4a1.5 1.5 0 0 0-3 0v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1z"/></svg>',
+  share: '<svg viewBox="0 0 24 24" width="19" height="19"><path fill="currentColor" d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 1 0-3-3c0 .24.04.47.09.7L8.04 9.81A3 3 0 0 0 6 9a3 3 0 1 0 0 6c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65a2.92 2.92 0 1 0 2.92-2.92"/></svg>',
+  cake: '<svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M19 4h-1V2h-2v2H8V2H6v2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2m0 16H5V10h14zm0-12H5V6h14z"/></svg>',
+  pin: '<svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 2a7 7 0 0 0-7 7c0 5.25 7 13 7 13s7-7.75 7-13a7 7 0 0 0-7-7m0 9.5A2.5 2.5 0 1 1 14.5 9 2.5 2.5 0 0 1 12 11.5"/></svg>',
+  film: '<svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M18 4l2 4h-3l-2-4h-2l2 4h-3l-2-4H8l2 4H7L5 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V4z"/></svg>',
+  grid: '<svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M3 3h8v8H3zm10 0h8v8h-8zM3 13h8v8H3zm10 0h8v8h-8z"/></svg>',
+  list: '<svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M3 5h18v2H3zm0 6h18v2H3zm0 6h18v2H3z"/></svg>',
+};
+
+function personAgeLabel(birthday, deathday) {
+  if (!birthday) return '';
+  const born = new Date(birthday);
+  if (Number.isNaN(born.getTime())) return '';
+  const end = deathday ? new Date(deathday) : new Date();
+  if (Number.isNaN(end.getTime())) return '';
+  let age = end.getFullYear() - born.getFullYear();
+  const month = end.getMonth() - born.getMonth();
+  if (month < 0 || (month === 0 && end.getDate() < born.getDate())) age -= 1;
+  return age > 0 ? `${age} anos` : '';
+}
+
+function personBornLabel(birthday, deathday) {
+  if (!birthday) return '';
+  const born = new Date(`${birthday}T12:00:00`);
+  if (Number.isNaN(born.getTime())) return birthday;
+  const date = born.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric' });
+  const age = personAgeLabel(birthday, deathday);
+  return age ? `${date} (${age})` : date;
+}
+
+function personRoleLabel(data) {
+  if (data.knownFor === 'Acting') return data.gender === 1 ? 'Atriz' : 'Ator';
+  if (data.knownFor === 'Directing') return 'Direção';
+  if (data.knownFor === 'Writing') return 'Roteiro';
+  if (data.knownFor === 'Production') return 'Produção';
+  return data.knownFor || 'Elenco';
+}
+
+function ppPosterSrc(url) {
+  return typeof optimizePosterUrl === 'function' ? optimizePosterUrl(url) : url;
+}
+
+function renderPersonCreditCard(item) {
+  const rating = Number(item.rating) > 0 ? `★ ${Number(item.rating).toFixed(1)}` : '';
+  const kind = item.type === 'movie' ? 'Filme' : 'Série';
+  const sub = [item.year, kind].filter(Boolean).join(' • ');
+  return `
+    <button class="poster-card pp-card" data-meta-id="${esc(item.id)}" data-meta-type="${esc(item.type)}" data-meta-name="${esc(item.name)}" data-meta-poster="${esc(item.poster || '')}" data-meta-banner="${esc(item.banner || '')}" data-meta-desc="" data-meta-release="${esc(item.year || '')}" data-meta-imdb="">
+      <div class="poster-img-wrap">
+        ${item.poster ? `<img src="${esc(ppPosterSrc(item.poster))}" alt="${esc(item.name)}" loading="lazy" decoding="async" draggable="false" />` : ''}
+      </div>
+      <div class="pp-card-info">
+        <div class="pp-card-title"><span class="pp-card-name">${esc(item.name)}</span>${rating ? `<span class="pp-rating">${rating}</span>` : ''}</div>
+        <div class="pp-card-sub">${esc(sub)}</div>
+        ${item.character ? `<div class="pp-card-char">como ${esc(item.character)}</div>` : ''}
+      </div>
+    </button>
+  `;
+}
+
+function personVisibleCredits(credits) {
+  let list = credits.slice();
+  if (personUi.type !== 'all') list = list.filter((c) => c.type === personUi.type);
+  if (personUi.sort === 'date') {
+    list.sort((a, b) => (Number(b.year) || 0) - (Number(a.year) || 0));
+  } else if (personUi.sort === 'date-asc') {
+    list.sort((a, b) => (Number(a.year) || 9999) - (Number(b.year) || 9999));
+  } else {
+    list.sort((a, b) => (Number(b.rating) || 0) - (Number(a.rating) || 0));
+  }
+  return list;
+}
+
+function renderPersonCredits() {
+  const grid = document.getElementById('pp-credits-grid');
+  if (!grid) return;
+  const credits = Array.isArray(activePersonContext?.full?.credits) ? activePersonContext.full.credits : [];
+  const list = personVisibleCredits(credits);
+  grid.className = `pp-grid ${personUi.view === 'list' ? 'list' : ''}`;
+  grid.innerHTML = list.length
+    ? list.map(renderPersonCreditCard).join('')
+    : `<div class="muted">${credits.length ? 'Nenhum título nesse filtro.' : 'Carregando filmografia…'}</div>`;
+  const count = document.getElementById('pp-credits-count');
+  if (count) count.textContent = credits.length ? `${list.length} títulos` : '';
+}
+
+async function openPersonPage(person) {
+  const id = String(person?.id || '').trim();
+  const personName = String(person?.name || '').trim();
+  if (!id && !personName) {
+    showToast('Elenco sem identificação no TMDB.');
+    return;
+  }
+  activePersonContext = { ...person, id };
+  personUi = { tab: 'filmography', type: 'all', sort: 'date', view: 'grid' };
+  setTab('person');
+  renderPersonScreen(person, null);
+  if (activeTabName() !== 'person') return;
+  try {
+    const data = await invoke('person_details', { personId: Number(id) || null, name: personName || null });
+    if (activePersonContext?.id === id && activePersonContext?.name === person.name && activeTabName() === 'person') {
+      activePersonContext.full = data;
+      renderPersonScreen(person, data);
+    }
+  } catch (error) {
+    showToast(String(error));
+  }
+}
+
+function renderPersonScreen(preview, data) {
+  const d = data || {};
+  const resolvedId = String(d.id || preview.id || '').trim();
+  const personKey = String(resolvedId || preview.name);
+  const name = d.name || preview.name || 'Elenco';
+  const photo = d.profile || preview.photo || '';
+  const bigPhoto = d.profileLarge || photo;
+  const credits = Array.isArray(d.credits) ? d.credits : [];
+  const backdrop = credits.filter((c) => c.banner)[0]?.banner || '';
+  const role = personRoleLabel(d);
+  if (data && (resolvedId || name)) {
+    syncFollowedPersonMeta({ id: resolvedId, name, photo, role });
+  }
+  const birthYear = d.birthday ? Number(d.birthday.slice(0, 4)) : 0;
+  const yearFloor = birthYear > 1900 ? birthYear : 1920;
+  const years = credits.map((c) => Number(c.year)).filter((y) => y >= yearFloor);
+  const sinceYear = years.length ? Math.min(...years) : null;
+  const biography = String(d.biography || '').trim();
+  const following = isPersonFollowed({ id: resolvedId, name });
+  const notified = notifiedPeople.has(personKey);
+
+  const infoRows = [
+    d.birthday && [PP_ICONS.cake, 'Nascimento', personBornLabel(d.birthday, d.deathday)],
+    d.placeOfBirth && [PP_ICONS.pin, 'Local', d.placeOfBirth],
+    credits.length && [PP_ICONS.film, 'Créditos', `${credits.length} títulos${sinceYear ? ` • desde ${sinceYear}` : ''}`],
+  ].filter(Boolean);
+
+  const heroWrap = document.getElementById('person-hero-wrapper');
+  const bodyWrap = document.getElementById('person-body-wrapper');
+  if (!heroWrap) return;
+  if (bodyWrap) bodyWrap.innerHTML = '';
+
+  heroWrap.innerHTML = `
+    <div class="pp-page">
+      ${backdrop ? `<img class="pp-bg-banner" src="${esc(backdrop)}" alt="" />` : ''}
+      ${bigPhoto ? `<img class="pp-bg-photo" src="${esc(bigPhoto)}" alt="" />` : ''}
+      <div class="pp-bg-scrim"></div>
+      <button class="circle-back-btn pp-back" id="btn-person-back" title="Voltar" type="button">${PP_ICONS.back}</button>
+      <div class="pp-layout">
+        <aside class="pp-side">
+          <div class="pp-id">
+            <div class="pp-avatar">${photo ? `<img src="${esc(photo)}" alt="${esc(name)}" draggable="false" />` : esc(name.charAt(0).toUpperCase())}</div>
+            <div class="pp-id-text">
+              <h1 class="pp-name">${esc(name)}</h1>
+              <div class="pp-role">${esc(role)}</div>
+            </div>
+          </div>
+          <div class="pp-actions">
+            <button class="pp-follow ${following ? 'active' : ''}" id="btn-person-follow" type="button">${following ? PP_ICONS.check : PP_ICONS.plus}<span>${following ? 'Seguindo' : 'Seguir'}</span></button>
+            <button class="pp-circle ${notified ? 'active' : ''}" id="btn-person-bell" type="button" title="Notificações">${PP_ICONS.bell}</button>
+            <button class="pp-circle" id="btn-person-homepage" type="button" title="Abrir no TMDB">${PP_ICONS.share}</button>
+          </div>
+          ${infoRows.length ? `<div class="pp-card-box pp-info">
+            ${infoRows.map(([icon, label, value]) => `<div class="pp-info-row"><span class="pp-info-icon">${icon}</span><span class="pp-info-label">${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('')}
+          </div>` : ''}
+          ${biography ? `<div class="pp-card-box pp-bio-box">
+            <h3>Biografia</h3>
+            <p class="pp-bio clamped" id="person-bio">${esc(biography)}</p>
+            <button class="pp-more" id="btn-person-bio" type="button">Ler mais ⌄</button>
+          </div>` : ''}
+        </aside>
+        <main class="pp-main">
+          <div class="pp-tabs" role="tablist">
+            <button class="pp-tab ${personUi.tab === 'overview' ? 'active' : ''}" data-person-tab="overview" type="button">Visão geral</button>
+            <button class="pp-tab ${personUi.tab === 'filmography' ? 'active' : ''}" data-person-tab="filmography" type="button">Filmografia</button>
+          </div>
+          <section class="pp-panel" id="pp-panel-overview" ${personUi.tab === 'overview' ? '' : 'hidden'}>
+            <h2 class="pp-title">Mais conhecidos</h2>
+            <div class="pp-grid" id="pp-known-grid"></div>
+          </section>
+          <section class="pp-panel" id="pp-panel-filmography" ${personUi.tab === 'filmography' ? '' : 'hidden'}>
+            <div class="pp-head">
+              <h2 class="pp-title">Filmografia <span class="pp-count" id="pp-credits-count"></span></h2>
+              <div class="pp-controls">
+                <select class="pp-select" id="pp-filter-type" aria-label="Filtrar por tipo">
+                  <option value="all" ${personUi.type === 'all' ? 'selected' : ''}>Todos</option>
+                  <option value="movie" ${personUi.type === 'movie' ? 'selected' : ''}>Filmes</option>
+                  <option value="series" ${personUi.type === 'series' ? 'selected' : ''}>Séries</option>
+                </select>
+                <select class="pp-select" id="pp-sort" aria-label="Ordenar">
+                  <option value="date" ${personUi.sort === 'date' ? 'selected' : ''}>Mais recentes</option>
+                  <option value="date-asc" ${personUi.sort === 'date-asc' ? 'selected' : ''}>Mais antigos</option>
+                  <option value="rating" ${personUi.sort === 'rating' ? 'selected' : ''}>Melhor nota</option>
+                </select>
+                <div class="pp-view-toggle">
+                  <button class="${personUi.view === 'grid' ? 'active' : ''}" data-person-view="grid" type="button" title="Grade">${PP_ICONS.grid}</button>
+                  <button class="${personUi.view === 'list' ? 'active' : ''}" data-person-view="list" type="button" title="Lista">${PP_ICONS.list}</button>
+                </div>
+              </div>
+            </div>
+            <div class="pp-grid" id="pp-credits-grid"></div>
+          </section>
+        </main>
+      </div>
+    </div>
+  `;
+
+  const known = credits.slice().sort((a, b) => (Number(b.rating) || 0) - (Number(a.rating) || 0)).slice(0, 12);
+  const knownGrid = document.getElementById('pp-known-grid');
+  if (knownGrid) knownGrid.innerHTML = known.map(renderPersonCreditCard).join('');
+  renderPersonCredits();
+
+  document.getElementById('btn-person-back').addEventListener('click', () => {
+    setTab(activeMetaContext ? 'details' : (previousTab || 'home'));
+  });
+  document.getElementById('btn-person-follow').addEventListener('click', () => {
+    const nowFollowing = toggleFollowPerson({ id: resolvedId, name, photo, role });
+    showToast(nowFollowing ? `Seguindo ${name}.` : `Deixou de seguir ${name}.`);
+    renderPersonScreen(preview, data);
+  });
+  document.getElementById('btn-person-bell').addEventListener('click', () => {
+    const was = notifiedPeople.has(personKey);
+    if (was) notifiedPeople.delete(personKey); else notifiedPeople.add(personKey);
+    showToast(was ? 'Notificações desativadas.' : `Você será avisado sobre ${name}.`);
+    renderPersonScreen(preview, data);
+  });
+  document.getElementById('btn-person-homepage').addEventListener('click', () => {
+    const url = d.homepage || (d.id ? `https://www.themoviedb.org/person/${d.id}` : '');
+    if (url) invoke('open_external_url', { url }).catch((e) => showToast(String(e)));
+  });
+  document.getElementById('btn-person-bio')?.addEventListener('click', (e) => {
+    const p = document.getElementById('person-bio');
+    const clamped = p.classList.toggle('clamped');
+    e.currentTarget.textContent = clamped ? 'Ler mais ⌄' : 'Ler menos ⌃';
+  });
+  heroWrap.querySelectorAll('[data-person-tab]').forEach((tab) => {
+    tab.addEventListener('click', () => {
+      personUi.tab = tab.dataset.personTab;
+      heroWrap.querySelectorAll('[data-person-tab]').forEach((o) => o.classList.toggle('active', o === tab));
+      document.getElementById('pp-panel-overview').hidden = personUi.tab !== 'overview';
+      document.getElementById('pp-panel-filmography').hidden = personUi.tab !== 'filmography';
+    });
+  });
+  document.getElementById('pp-filter-type').addEventListener('change', (e) => {
+    personUi.type = e.target.value;
+    renderPersonCredits();
+  });
+  document.getElementById('pp-sort').addEventListener('change', (e) => {
+    personUi.sort = e.target.value;
+    renderPersonCredits();
+  });
+  heroWrap.querySelectorAll('[data-person-view]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      personUi.view = btn.dataset.personView;
+      heroWrap.querySelectorAll('[data-person-view]').forEach((o) => o.classList.toggle('active', o === btn));
+      renderPersonCredits();
+    });
+  });
+}
+
 // --- FULL-SCREEN META DETAILS SCREEN (MetaDetailsScreen.kt) ---
+function formatDetailStatus(status, isSeries) {
+  const raw = String(status || '').trim();
+  if (!raw) return '';
+  switch (raw.toLowerCase()) {
+    case 'released': return 'Lançado';
+    case 'ended': return isSeries ? 'Finalizada' : 'Encerrado';
+    case 'returning series':
+    case 'continuing': return 'Em exibição';
+    case 'current': return 'Atual';
+    case 'canceled':
+    case 'cancelled': return isSeries ? 'Cancelada' : 'Cancelado';
+    case 'planned': return 'Planejado';
+    case 'in production': return 'Em produção';
+    case 'post production': return 'Pós-produção';
+    case 'rumored': return 'Rumor';
+    case 'pilot': return 'Piloto';
+    default: return raw;
+  }
+}
+
+function formatDetailRuntime(rawRuntime) {
+  const raw = String(rawRuntime || '').trim();
+  if (!raw) return '';
+  let mins = 0;
+  const hMatch = raw.match(/(\d+)\s*h/i);
+  const mMatch = raw.match(/(\d+)\s*m/i);
+  if (hMatch || mMatch) {
+    mins = (hMatch ? Number(hMatch[1]) * 60 : 0) + (mMatch ? Number(mMatch[1]) : 0);
+  } else {
+    const colon = raw.match(/^(\d+)\s*:\s*(\d{1,2})$/);
+    if (colon) mins = Number(colon[1]) * 60 + Number(colon[2]);
+    else if (/^\d+$/.test(raw)) mins = Number(raw);
+  }
+  if (!Number.isFinite(mins) || mins <= 0) return raw;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  if (h > 0 && m > 0) return `${h}h ${m}m`;
+  if (h > 0) return `${h}h`;
+  return `${m}m`;
+}
+
+function formatDetailReleaseDate(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return '';
+  if (/^\d{4}$/.test(text)) return text;
+  const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!iso) return text;
+  const d = new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]));
+  if (Number.isNaN(d.getTime())) return text;
+  return d.toLocaleDateString('pt-BR', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+function normalizePersonRole(role) {
+  const r = String(role || '').trim();
+  if (!r) return '';
+  const low = r.toLowerCase();
+  if (low === 'director') return 'Diretor';
+  if (low === 'creator') return 'Criador';
+  if (low === 'writer' || low === 'screenplay') return 'Roteirista';
+  return r;
+}
+
+function extractDetailPeople(m) {
+  const dirs = [];
+  const dirSeen = new Map();
+  const actors = [];
+  const actorSeen = new Map();
+
+  const pushEntry = (target, seen, entry, fallbackRole = '') => {
+    if (!entry) return;
+    const isObj = typeof entry === 'object';
+    const name = String(isObj ? (entry.name || '') : entry).trim();
+    if (!name) return;
+    const role = normalizePersonRole(isObj ? (entry.character || entry.role || fallbackRole) : fallbackRole);
+    let photo = isObj ? (entry.photo || entry.profile || entry.image || entry.profile_path || '') : '';
+    if (photo && photo.startsWith('/')) photo = `https://image.tmdb.org/t/p/w185${photo}`;
+    const id = isObj ? String(entry.id || entry.tmdbId || '').trim() : '';
+    const key = `${name.toLowerCase()}|${role.toLowerCase()}`;
+    if (seen.has(key)) {
+      const prev = seen.get(key);
+      if (!prev.photo && photo) prev.photo = photo;
+      if (!prev.id && id) prev.id = id;
+      return;
+    }
+    const item = { id, name, character: role, photo };
+    seen.set(key, item);
+    target.push(item);
+  };
+
+  if (Array.isArray(m.app_extras?.creators)) {
+    m.app_extras.creators.forEach((c) => pushEntry(dirs, dirSeen, c, 'Criador'));
+  }
+  if (Array.isArray(m.app_extras?.directors)) {
+    m.app_extras.directors.forEach((d) => pushEntry(dirs, dirSeen, d, 'Diretor'));
+  }
+  if (Array.isArray(m.director)) {
+    m.director.forEach((d) => pushEntry(dirs, dirSeen, d, 'Diretor'));
+  } else if (typeof m.director === 'string' && m.director.trim()) {
+    m.director.split(',').forEach((d) => pushEntry(dirs, dirSeen, d.trim(), 'Diretor'));
+  }
+
+  const castSource = m.castMembers || m.credits_cast || m.app_extras?.cast || m.cast;
+  const rawCast = Array.isArray(castSource) ? castSource : [];
+  rawCast.forEach((c) => {
+    const isObj = typeof c === 'object';
+    const name = String(isObj ? (c?.name || '') : (c || '')).trim();
+    const role = normalizePersonRole(isObj ? (c?.character || c?.role || '') : '');
+    const key = `${name.toLowerCase()}|${role.toLowerCase()}`;
+    if (dirSeen.has(key)) {
+      pushEntry(dirs, dirSeen, c, role);
+    } else {
+      pushEntry(actors, actorSeen, c, '');
+    }
+  });
+
+  return [...dirs, ...actors];
+}
+
+function extractProductionCompanies(m, isSeries) {
+  const parseList = (val) => {
+    if (Array.isArray(val)) {
+      return val.map((c) => (typeof c === 'string'
+        ? { name: c.trim(), logo: '', id: '' }
+        : { name: String(c?.name || '').trim(), logo: c?.logo || c?.logoUrl || '', id: c?.id || c?.tmdbId || '' }))
+        .filter((c) => c.name);
+    }
+    if (typeof val === 'string' && val.trim()) {
+      return val.split(',').map((s) => ({ name: s.trim(), logo: '', id: '' })).filter((c) => c.name);
+    }
+    return [];
+  };
+  const prod = parseList(m.productionCompanies).length
+    ? parseList(m.productionCompanies)
+    : (parseList(m.app_extras?.productionCompanies).length ? parseList(m.app_extras?.productionCompanies) : parseList(m.production));
+  const net = parseList(m.networkCompanies).length
+    ? parseList(m.networkCompanies)
+    : (parseList(m.app_extras?.networks).length ? parseList(m.app_extras?.networks) : parseList(m.networks));
+  const chosen = isSeries ? (net.length ? net : prod) : (prod.length ? prod : net);
+  if (!isSeries) {
+    const withLogo = chosen.filter((c) => c.logo);
+    return (withLogo.length ? withLogo : chosen).slice(0, 6);
+  }
+  return chosen.slice(0, 6);
+}
+
+function localizeTrailerCategory(rawType) {
+  const t = String(rawType || '').trim();
+  if (!t) return 'Trailer';
+  switch (t.toLowerCase()) {
+    case 'trailer': return 'Trailer';
+    case 'teaser': return 'Teaser';
+    case 'clip': return 'Clipe';
+    case 'featurette': return 'Featurette';
+    case 'behind the scenes': return 'Bastidores';
+    case 'bloopers': return 'Erros';
+    default: return t;
+  }
+}
+
+function extractYoutubeKey(item) {
+  const direct = String(item?.key || item?.source || '').trim();
+  if (direct && /^[A-Za-z0-9_-]{6,20}$/.test(direct)) return direct;
+  const url = String(item?.url || '').trim();
+  const match = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([A-Za-z0-9_-]{6,20})/i);
+  return match ? match[1] : '';
+}
+
+function extractDetailTrailers(m, fallbackTitle, fallbackRelease) {
+  const raw = [
+    ...(Array.isArray(m.trailers) ? m.trailers : []),
+    ...(Array.isArray(m.trailerStreams) ? m.trailerStreams : []),
+  ];
+  const seen = new Set();
+  const out = [];
+  raw.forEach((tr) => {
+    if (!tr || typeof tr !== 'object') return;
+    const key = extractYoutubeKey(tr);
+    const url = tr.url || (key ? `https://www.youtube.com/watch?v=${key}` : '');
+    if (!key && !url) return;
+    const dedupe = key || url;
+    if (seen.has(dedupe)) return;
+    seen.add(dedupe);
+    const category = localizeTrailerCategory(tr.type);
+    const titleText = String(tr.name || tr.title || '').trim() || `${category} - ${fallbackTitle}`;
+    const rawYear = String(tr.publishedAt || tr.published_at || tr.year || fallbackRelease || '').trim();
+    const yearMatch = rawYear.match(/\b(\d{4})\b/);
+    out.push({
+      key,
+      url,
+      category,
+      name: titleText,
+      year: yearMatch ? yearMatch[1] : '',
+      thumb: key ? `https://img.youtube.com/vi/${key}/hqdefault.jpg` : '',
+    });
+  });
+  return out;
+}
+
+function renderDetailsLoading() {
+  const backdropEl = document.getElementById('detail-screen-backdrop');
+  if (backdropEl) backdropEl.innerHTML = '';
+  const heroWrap = document.getElementById('detail-hero-wrapper');
+  if (heroWrap) {
+    heroWrap.innerHTML = `
+      <div class="detail-loading-stage">
+        <div class="detail-top-bar">
+          <button class="circle-back-btn" id="btn-detail-back" title="Voltar">
+            <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M15.41 7.41L14 6l-6 6l6 6l1.41-1.41L10.83 12z"/></svg>
+          </button>
+        </div>
+        <div class="detail-loading-spinner" aria-label="Carregando detalhes"></div>
+      </div>
+    `;
+    document.getElementById('btn-detail-back')?.addEventListener('click', () => setTab(previousTab || 'home'));
+  }
+  const bodyWrap = document.getElementById('detail-body-wrapper');
+  if (bodyWrap) bodyWrap.innerHTML = '';
+}
+
 async function openDetailsPage(preview) {
   activeMetaContext = { ...preview, full: null };
   setTab('details');
-  renderDetailsScreen(preview, null);
+
+  const cached = getCachedMetaDetails(preview.type, preview.id);
+  if (cached) {
+    activeMetaContext.full = cached;
+    renderDetailsScreen(preview, cached);
+    return;
+  }
+
+  renderDetailsLoading();
 
   try {
-    const meta = await invoke('fetch_meta_details', { mediaType: preview.type, id: preview.id });
+    const meta = await fetchMetaDetailsCached(preview.type, preview.id);
     if (activeMetaContext?.id === preview.id) {
       activeMetaContext.full = meta;
       renderDetailsScreen(preview, meta);
     }
   } catch {
-    // Keep preview details when addon lacks meta resource
+    if (activeMetaContext?.id === preview.id) {
+      renderDetailsScreen(preview, null);
+    }
   }
 }
 
 function findCwResumeForContent(contentId) {
-  return cwCardsCache.find((c) => c.content_id === contentId) || null;
+  return cwCardsCache.find((c) => simklUses('progress') ? simklProgressMatches(c, contentId) : c.content_id === contentId) || null;
+}
+
+function updateDetailScrollDim() {
+  const dim = document.getElementById('detail-scroll-dim');
+  const hero = document.querySelector('#tab-details .detail-hero');
+  if (!dim || !hero) return;
+  const heroH = hero.offsetHeight || 660;
+  const progress = Math.min(1, Math.max(0, (mainViewportEl?.scrollTop || 0) / (heroH * 0.75)));
+  const mode = appSettings?.detail_bg_mode || 'cinematic';
+  const maxAlpha = mode === 'normal' ? 0.86 : 0.36;
+  dim.style.opacity = (progress * maxAlpha).toFixed(3);
 }
 
 function renderDetailsScreen(preview, meta) {
   const m = meta || {};
   const title = m.name || preview.name || 'Sem título';
-  const bg = m.background || preview.banner || m.poster || preview.poster || '';
+  const bg = m.background || preview.banner || m.poster || '';
+  const backdropEl = document.getElementById('detail-screen-backdrop');
+  if (backdropEl) {
+    backdropEl.innerHTML = `
+      ${bg ? `<img class="detail-screen-bg" src="${esc(bg)}" alt="" />` : ''}
+      <div class="detail-scrim-side"></div>
+      <div class="detail-scroll-dim" id="detail-scroll-dim"></div>
+    `;
+  }
   const logo = m.logo || preview.logo || '';
   const desc = m.description || preview.description || '';
   const release = m.releaseInfo || preview.release_info || '';
   const imdb = m.imdbRating || preview.imdb_rating || '';
-  const runtime = m.runtime || '';
+  const runtime = formatDetailRuntime(m.runtime || '');
   const resolvedTmdbId = m.moviedb_id || m.tmdb_id || preview.tmdbId || null;
-  const ageRating = m.ageRating || m.certification || '';
+  const ageRating = m.ageRating || m.app_extras?.certificationLocal || m.certification || m.app_extras?.certification || '';
   const genres = Array.isArray(m.genres) ? m.genres : [];
   const videos = Array.isArray(m.videos) ? m.videos : [];
-  const cast = Array.isArray(m.castMembers || m.credits_cast || m.cast)
-    ? (m.castMembers || m.credits_cast || m.cast)
-    : [];
+  const isSeriesLike = preview.type === 'series' || videos.some((v) => v.season != null || v.episode != null);
+  const statusLabel = formatDetailStatus(m.status, isSeriesLike);
+  const cast = extractDetailPeople(m);
+  const companies = extractProductionCompanies(m, isSeriesLike);
+  const trailers = extractDetailTrailers(m, title, release);
 
   const inLib = librarySet.has(libKey(preview.id, preview.type));
   const titleWatched = watchedSet.has(preview.id);
   const cwResume = findCwResumeForContent(preview.id);
 
-  let defaultPlayId = preview.id;
+  let defaultPlayId = preview.id.startsWith('tmdb:') && m.imdb_id ? m.imdb_id : preview.id;
   let defaultPlayLabel = cwResume ? 'Continuar' : 'Assistir';
   let defaultEpisodeInfo = null;
   let resumeSecs = cwResume ? Math.max(0, (cwResume.position_ms || 0) / 1000) : 0;
@@ -1306,9 +2422,6 @@ function renderDetailsScreen(preview, meta) {
   const heroWrap = document.getElementById('detail-hero-wrapper');
   heroWrap.innerHTML = `
     <div class="detail-hero">
-      ${bg ? `<img class="detail-hero-bg" src="${esc(bg)}" alt="" />` : ''}
-      <div class="detail-scrim-side"></div>
-      <div class="detail-scrim-bottom"></div>
       <div class="detail-top-bar">
         <button class="circle-back-btn" id="btn-detail-back" title="Voltar">
           <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M15.41 7.41L14 6l-6 6l6 6l1.41-1.41L10.83 12z"/></svg>
@@ -1318,10 +2431,11 @@ function renderDetailsScreen(preview, meta) {
         ${logo ? `<img class="detail-logo" src="${esc(logo)}" alt="${esc(title)}" />` : `<h1 class="detail-title">${esc(title)}</h1>`}
         <div class="detail-meta-chips">
           ${imdb ? `<span class="imdb-chip"><img src="assets/rating_imdb.png" alt="IMDb" /> ${esc(imdb)}</span>` : ''}
-          ${release ? `<span>${esc(release)}</span>` : ''}
+          ${ratingBadges(m.externalRatings)}
+          ${release ? `<span>${esc(formatDetailReleaseDate(release))}</span>` : ''}
           ${runtime ? `<span>• ${esc(runtime)}</span>` : ''}
           ${ageRating ? `<span class="meta-badge">${esc(ageRating)}</span>` : ''}
-          ${m.status ? `<span class="meta-badge">${esc(m.status)}</span>` : ''}
+          ${statusLabel ? `<span class="meta-badge">${esc(statusLabel)}</span>` : ''}
         </div>
         ${genres.length ? `<div class="detail-genres">${esc(genres.slice(0, 4).join(' • '))}</div>` : ''}
         ${desc ? `
@@ -1342,7 +2456,7 @@ function renderDetailsScreen(preview, meta) {
               <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M10.59 9.17 5.41 4 4 5.41l5.17 5.17zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4zm.33 9.41-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04z"/></svg>
             </button>
           ` : ''}
-          ${(m.trailers?.length || m.trailerStreams?.length) ? `
+          ${trailers.length ? `
             <button class="detail-circle-action" id="btn-detail-trailer" title="Assistir Trailer">
               <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M18 4l2 4h-3l-2-4h-2l2 4h-3l-2-4H8l2 4H7L5 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V4z"/></svg>
             </button>
@@ -1378,9 +2492,8 @@ function renderDetailsScreen(preview, meta) {
     });
   });
   document.getElementById('btn-detail-trailer')?.addEventListener('click', () => {
-    const tr = m.trailers?.[0] || m.trailerStreams?.[0];
-    const url = tr?.url || (tr?.source ? `https://www.youtube.com/watch?v=${tr.source}` : '');
-    if (url) invoke('open_external_url', { url }).catch((e) => showToast(String(e)));
+    const tr = trailers[0];
+    if (tr?.url) invoke('open_external_url', { url: tr.url }).catch((e) => showToast(String(e)));
   });
   document.getElementById('btn-detail-library').addEventListener('click', async (e) => {
     const btn = e.currentTarget;
@@ -1422,15 +2535,16 @@ function renderDetailsScreen(preview, meta) {
 
   const bodyWrap = document.getElementById('detail-body-wrapper');
   let bodyHtml = '';
-
-  if (videos.length > 0) {
-    const seasons = [...new Set(videos.map((v) => v.season ?? 1))].sort((a, b) => a - b);
+  const seasonInfo = new Map((m.tmdbSeasons || []).map(s => [s.number, s]));
+  const seasons = [...new Set([...videos.map(v => v.season ?? 1),
+    ...(appSettings?.services?.tmdb_episodes ? seasonInfo.keys() : [])])].sort((a,b) => a-b);
+  if (seasons.length > 0) {
     const defaultSeason = seasons.find((s) => s > 0) ?? seasons[0];
     bodyHtml += `
       <div>
         <div class="row-gap" style="justify-content:space-between;margin-bottom:10px;">
           <div class="season-pills" id="detail-season-pills" style="margin-bottom:0;">
-            ${seasons.map((s) => `<button class="season-pill ${s === defaultSeason ? 'active' : ''}" data-season="${s}">${s === 0 ? 'Especiais' : `Temporada ${s}`}</button>`).join('')}
+            ${seasons.map((s) => `<button class="season-pill ${s === defaultSeason ? 'active' : ''}" data-season="${s}">${seasonInfo.get(s)?.poster ? `<img class="season-thumb" src="${esc(seasonInfo.get(s).poster)}" loading="lazy" alt="" />` : ''}${s === 0 ? 'Especiais' : `Temporada ${s}`}</button>`).join('')}
           </div>
           <button class="btn-ghost" id="btn-season-mark-watched" style="font-size:12px;">&#10003; Marcar temporada vista</button>
         </div>
@@ -1439,17 +2553,37 @@ function renderDetailsScreen(preview, meta) {
     `;
   }
 
+  if (companies.length > 0) {
+    const prodTitle = isSeriesLike ? 'Emissoras' : 'Produção';
+    bodyHtml += `
+      <section class="production-section">
+        <h3 class="detail-section-title">${prodTitle}</h3>
+        <div class="production-chips-row">
+          ${companies.map((c) => `
+            <div class="production-chip" title="${esc(c.name)}">
+              ${c.logo ? `<img src="${esc(c.logo)}" alt="${esc(c.name)}" loading="lazy" draggable="false" />` : `<span>${esc(c.name)}</span>`}
+            </div>
+          `).join('')}
+        </div>
+      </section>
+    `;
+  }
+
   if (cast.length > 0) {
     bodyHtml += `
-      <div>
-        <h3 style="margin:0 0 12px;">Elenco</h3>
+      <section>
+        <h3 class="detail-section-title">Elenco</h3>
         <div class="cast-row shelf-row">
-          ${cast.slice(0, 18).map((c) => {
-            const actorName = typeof c === 'string' ? c : (c.name || '');
-            const character = typeof c === 'string' ? '' : (c.character || c.role || '');
-            const photo = typeof c === 'string' ? '' : (c.photo || c.profile || c.image || '');
+          ${cast.slice(0, 24).map((c) => {
+            const actorName = c.name || '';
+            const character = c.character || '';
+            const photo = c.photo || '';
+            const personId = c.id || '';
+            const personAttrs = actorName
+              ? ` data-person-id="${esc(personId)}" data-person-name="${esc(actorName)}" data-person-photo="${esc(photo)}" role="button" tabindex="0"`
+              : '';
             return `
-              <div class="cast-portrait-card">
+              <div class="cast-portrait-card"${personAttrs}>
                 <div class="cast-avatar-circle">
                   ${photo ? `<img src="${esc(photo)}" alt="${esc(actorName)}" loading="lazy" draggable="false" />` : esc(actorName.charAt(0).toUpperCase())}
                 </div>
@@ -1459,33 +2593,122 @@ function renderDetailsScreen(preview, meta) {
             `;
           }).join('')}
         </div>
-      </div>
+      </section>
     `;
   }
 
-  const extras = [
-    m.director && ['Direção', Array.isArray(m.director) ? m.director.join(', ') : m.director],
-    m.writer && ['Roteiro', Array.isArray(m.writer) ? m.writer.join(', ') : m.writer],
-    m.country && ['País', m.country],
-    m.language && ['Idioma', m.language],
-    m.imdb_id && ['IMDb ID', m.imdb_id],
+  let trailerGroups = null;
+  let defaultTrailerCategory = '';
+  if (trailers.length > 0) {
+    trailerGroups = new Map();
+    trailers.forEach((tr) => {
+      if (!trailerGroups.has(tr.category)) trailerGroups.set(tr.category, []);
+      trailerGroups.get(tr.category).push(tr);
+    });
+    const categories = Array.from(trailerGroups.keys());
+    defaultTrailerCategory = categories.find((c) => c.toLowerCase() === 'trailer') || categories[0];
+    bodyHtml += `
+      <section class="detail-trailers-section">
+        <div class="trailer-header-row">
+          <h3 class="detail-section-title">Trailers</h3>
+          <div class="trailer-cat-wrap">
+            <select id="detail-trailer-category" class="trailer-cat-select" aria-label="Categoria de trailer">
+              ${categories.map((cat) => `<option value="${esc(cat)}"${cat === defaultTrailerCategory ? ' selected' : ''}>${esc(cat)}</option>`).join('')}
+            </select>
+            <svg class="trailer-cat-chevron" viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M7.41 8.59 12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>
+          </div>
+        </div>
+        <div class="shelf-row detail-trailers-row" id="detail-trailers-row"></div>
+      </section>
+    `;
+  }
+
+  const infoRows = [
+    statusLabel && ['Status', statusLabel],
+    release && ['Informações de lançamento', formatDetailReleaseDate(release)],
+    runtime && ['Duração', runtime],
+    ageRating && ['Classificação', ageRating],
+    m.country && ['País de origem', m.country],
+    m.language && ['Idioma original', String(m.language).toUpperCase()],
   ].filter(Boolean);
 
-  if (extras.length > 0) {
+  if (infoRows.length > 0) {
+    const infoTitle = isSeriesLike ? 'Detalhes da série' : 'Detalhes do filme';
     bodyHtml += `
-      <div>
-        <h3 style="margin:0 0 12px;">Mais Informações</h3>
-        <div class="settings-card">
-          ${extras.map(([k, v]) => `<div class="kv-line"><span>${esc(k)}</span><strong>${esc(v)}</strong></div>`).join('')}
+      <section>
+        <h3 class="detail-section-title">${infoTitle}</h3>
+        <div class="detail-info-table">
+          ${infoRows.map(([k, v]) => `
+            <div class="detail-info-row">
+              <span class="detail-info-label">${esc(k)}</span>
+              <span class="detail-info-value">${esc(v)}</span>
+            </div>
+          `).join('')}
         </div>
-      </div>
+      </section>
     `;
   }
 
+  if (!isSeriesLike) {
+    bodyHtml += metadataLandscapeShelf(m.collectionName || 'Coleção', m.tmdbCollection);
+  }
+  if (typeof simklUses !== 'function' || !simklUses('similar')) {
+    bodyHtml += metadataLandscapeShelf('Mais como este', m.tmdbSimilar);
+  }
   bodyWrap.innerHTML = bodyHtml;
+  updateDetailScrollDim();
+  simklRenderDetails(preview, bodyWrap);
 
-  if (videos.length > 0) {
-    const seasons = [...new Set(videos.map((v) => v.season ?? 1))].sort((a, b) => a - b);
+  const missingPhotoCards = Array.from(bodyWrap.querySelectorAll('.cast-portrait-card'))
+    .filter((card) => !card.dataset.personPhoto && card.dataset.personName);
+  if (missingPhotoCards.length > 0 && appSettings?.tmdb_api_key) {
+    const names = [...new Set(missingPhotoCards.map((c) => c.dataset.personName))].slice(0, 18);
+    invoke('resolve_people_photos', { names }).then((resolved) => {
+      if (!resolved || !bodyWrap.isConnected || activeMetaContext?.id !== preview.id) return;
+      missingPhotoCards.forEach((card) => {
+        const entry = resolved[card.dataset.personName];
+        if (!entry) return;
+        if (entry.id && !card.dataset.personId) card.dataset.personId = String(entry.id);
+        if (entry.photo) {
+          card.dataset.personPhoto = entry.photo;
+          const circle = card.querySelector('.cast-avatar-circle');
+          if (circle && !circle.querySelector('img')) {
+            circle.innerHTML = `<img src="${esc(entry.photo)}" alt="${esc(card.dataset.personName)}" loading="lazy" draggable="false" />`;
+          }
+        }
+      });
+    }).catch(() => {});
+  }
+
+  if (trailerGroups && defaultTrailerCategory) {
+    const trailersRow = document.getElementById('detail-trailers-row');
+    const trailerSelect = document.getElementById('detail-trailer-category');
+    const renderTrailersForCategory = (cat) => {
+      const items = trailerGroups.get(cat) || [];
+      trailersRow.innerHTML = items.map((tr, idx) => `
+        <button class="trailer-card" data-trailer-idx="${idx}" type="button">
+          <div class="trailer-thumb-wrap">
+            ${tr.thumb ? `<img src="${esc(tr.thumb)}" alt="${esc(tr.name)}" loading="lazy" draggable="false" />` : ''}
+            <div class="trailer-thumb-scrim"></div>
+          </div>
+          <div class="trailer-card-title">${esc(tr.name)}</div>
+          ${tr.year ? `<div class="trailer-card-year">${esc(tr.year)}</div>` : ''}
+        </button>
+      `).join('');
+      trailersRow.querySelectorAll('.trailer-card').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          if (trailersRow.dataset.suppressClick) return;
+          const tr = items[Number(btn.dataset.trailerIdx)];
+          if (tr?.url) invoke('open_external_url', { url: tr.url }).catch((e) => showToast(String(e)));
+        });
+      });
+    };
+    renderTrailersForCategory(defaultTrailerCategory);
+    trailerSelect?.addEventListener('change', (e) => renderTrailersForCategory(e.target.value));
+  }
+
+  if (seasons.length > 0) {
+    const requestedSeasons = new Set();
     let currentSeason = seasons.find((s) => s > 0) ?? seasons[0];
     const nowTs = Date.now();
 
@@ -1493,6 +2716,21 @@ function renderDetailsScreen(preview, meta) {
       currentSeason = seasonNum;
       const eps = videos.filter((v) => (v.season ?? 1) === seasonNum);
       const grid = document.getElementById('detail-episodes-grid');
+      if (seasonInfo.has(seasonNum) && appSettings?.services?.tmdb_episodes && !requestedSeasons.has(seasonNum)) {
+        requestedSeasons.add(seasonNum);
+        invoke('tmdb_season_episodes', { series: Number(resolvedTmdbId), season: seasonNum })
+          .then(rows => {
+            if (!grid.isConnected || !rows.length) return;
+            mergeSeasonEpisodes(videos, rows, preview, m);
+            if (!defaultEpisodeInfo) {
+              defaultEpisodeInfo = videos.find(v => v.season > 0) || videos[0];
+              defaultPlayId = defaultEpisodeInfo.id;
+              document.querySelector('#btn-detail-play span').textContent =
+                `Assistir T${defaultEpisodeInfo.season} E${defaultEpisodeInfo.episode}`;
+            }
+            if (currentSeason === seasonNum) renderSeasonEpisodes(seasonNum);
+          }).catch(() => requestedSeasons.delete(seasonNum));
+      }
       grid.innerHTML = eps.map((ep, idx) => {
         const epNum = ep.episode ?? ep.number ?? idx + 1;
         const thumb = ep.thumbnail || bg;
@@ -1553,6 +2791,20 @@ function renderDetailsScreen(preview, meta) {
 
     document.getElementById('btn-season-mark-watched').onclick = async () => {
       const eps = videos.filter((v) => (v.season ?? 1) === currentSeason);
+      if (simklUses('progress')) {
+        const episodes = eps.map(ep => ({number:ep.episode ?? ep.number ?? 1}))
+          .filter(ep => !watchedSet.has(epWatchKey(preview.id,currentSeason,ep.number)));
+        if (!episodes.length) return;
+        try {
+          await simklMutate('history_add', preview.id,preview.type, {
+            seasons:[{number:currentSeason, episodes}],
+            ...(simklFindEntry(preview.id)?.bucket === 'anime' ? {use_tvdb_anime_seasons:true} : {}),
+          });
+          await refreshWatchedKeys();
+          renderSeasonEpisodes(currentSeason);
+        } catch(e) {showToast(String(e));}
+        return;
+      }
       for (const ep of eps) {
         const epNum = ep.episode ?? ep.number ?? 1;
         if (!watchedSet.has(epWatchKey(preview.id, currentSeason, epNum))) {
@@ -1583,10 +2835,82 @@ function parseStreamBadges(stream) {
   return { pills: [...new Set(pills)], formattedSize };
 }
 
+function bindHorizontalDragScroll(el) {
+  if (!el || el.dataset.dragBound === '1') return;
+  el.dataset.dragBound = '1';
+  let down = false;
+  let moved = false;
+  let captured = false;
+  let startX = 0;
+  let startLeft = 0;
+
+  el.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    down = true;
+    moved = false;
+    captured = false;
+    startX = e.clientX;
+    startLeft = el.scrollLeft;
+  });
+  el.addEventListener('pointermove', (e) => {
+    if (!down) return;
+    const dx = e.clientX - startX;
+    if (!moved && Math.abs(dx) > 5) {
+      moved = true;
+      el.classList.add('dragging');
+      if (!captured && el.setPointerCapture) {
+        try { el.setPointerCapture(e.pointerId); captured = true; } catch {}
+      }
+    }
+    if (moved) el.scrollLeft = startLeft - dx;
+  });
+  const endDrag = (e) => {
+    if (!down) return;
+    down = false;
+    el.classList.remove('dragging');
+    if (captured && el.releasePointerCapture) {
+      try { el.releasePointerCapture(e.pointerId); } catch {}
+      captured = false;
+    }
+  };
+  el.addEventListener('pointerup', endDrag);
+  el.addEventListener('pointercancel', endDrag);
+  el.addEventListener('click', (e) => {
+    if (moved) {
+      e.preventDefault();
+      e.stopPropagation();
+      moved = false;
+    }
+  }, true);
+  el.addEventListener('wheel', (e) => {
+    if (el.scrollWidth <= el.clientWidth) return;
+    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+      el.scrollLeft += e.deltaY;
+      e.preventDefault();
+    }
+  }, { passive: false });
+}
+
+function closeStreamActionsPopup() {
+  document.getElementById('stream-actions-popup')?.classList.add('hidden');
+}
+
+document.addEventListener('pointerdown', (e) => {
+  const popup = document.getElementById('stream-actions-popup');
+  if (popup && !popup.classList.contains('hidden') && !popup.contains(e.target)) {
+    closeStreamActionsPopup();
+  }
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeStreamActionsPopup();
+});
+
 async function openStreamsScreen(ctx) {
   if (streamUnlistenAddon) { streamUnlistenAddon(); streamUnlistenAddon = null; }
   if (streamUnlistenDone) { streamUnlistenDone(); streamUnlistenDone = null; }
   if (streamUnlistenScrapers) { streamUnlistenScrapers(); streamUnlistenScrapers = null; }
+  closeStreamActionsPopup();
 
   activeStreamCtx = ctx;
   streamGroups = [];
@@ -1594,18 +2918,21 @@ async function openStreamsScreen(ctx) {
   activeScrapers = [];
 
   setTab('streams');
-  const artwork = ctx.episode?.thumbnail || ctx.background || ctx.poster || '';
+  reportPartyPlayerStatus('choosing', partyStreamMediaKey());
+  const streamsBgMode = appSettings?.streams_bg_mode || 'cover';
+  const artwork = streamsBgMode === 'default'
+    ? ''
+    : (ctx.background || ctx.poster || ctx.episode?.thumbnail || '');
   document.getElementById('streams-bg-image').style.backgroundImage = artwork ? `url("${artwork}")` : 'none';
+  document.getElementById('streams-screen-root').classList.toggle('streams-bg-plain', !artwork);
 
   const epLabel = ctx.episode
-    ? `T${ctx.episode.season ?? 1} E${ctx.episode.episode ?? ctx.episode.number ?? 1} • ${ctx.episode.title || ctx.episode.name || ''}`
+    ? `T${ctx.episode.season ?? 1} E${ctx.episode.episode ?? ctx.episode.number ?? 1} - ${ctx.episode.title || ctx.episode.name || 'Episódio'}`
     : '';
 
   document.getElementById('streams-meta-summary').innerHTML = `
-    ${ctx.logo ? `<img src="${esc(ctx.logo)}" style="max-width:300px;max-height:84px;object-fit:contain;" alt="" />` : `<h2 style="margin:0;font-size:28px;">${esc(ctx.title)}</h2>`}
-    ${ctx.episode?.thumbnail ? `<img class="streams-ep-thumb" src="${esc(ctx.episode.thumbnail)}" alt="" />` : ''}
-    ${epLabel ? `<div style="font-size:16px;font-weight:600;">${esc(epLabel)}</div>` : ''}
-    ${ctx.episode?.overview || ctx.episode?.description ? `<p class="muted">${esc(ctx.episode.overview || ctx.episode.description)}</p>` : ''}
+    ${ctx.logo ? `<img src="${esc(ctx.logo)}" style="max-width:100%;max-height:120px;object-fit:contain;" alt="" />` : `<h2 style="margin:0;font-size:32px;font-weight:900;text-shadow:0 2px 6px rgba(0,0,0,0.8);">${esc(ctx.title)}</h2>`}
+    ${epLabel ? `<div style="font-size:16px;font-weight:700;color:rgba(255,255,255,0.9);text-shadow:0 1px 4px rgba(0,0,0,0.9);">${esc(epLabel)}</div>` : ''}
   `;
 
   const bannerEl = document.getElementById('streams-resume-banner');
@@ -1659,13 +2986,19 @@ function renderActiveScrapersRow() {
     el.innerHTML = '';
     return;
   }
+  const prevScroll = document.getElementById('active-scrapers-carousel')?.scrollLeft || 0;
   el.classList.remove('hidden');
   el.innerHTML = `
-    <div class="active-scrapers-title">Scrapers ativos</div>
-    <div class="active-scrapers-row">
+    <div class="active-scrapers-title">Scrapers ativos (${activeScrapers.length})</div>
+    <div class="active-scrapers-row" id="active-scrapers-carousel">
       ${activeScrapers.map((name) => `<span class="scraper-shimmer-chip">${esc(name)}</span>`).join('')}
     </div>
   `;
+  const row = document.getElementById('active-scrapers-carousel');
+  if (row) {
+    row.scrollLeft = prevScroll;
+    bindHorizontalDragScroll(row);
+  }
 }
 
 document.getElementById('btn-streams-back').addEventListener('click', () => {
@@ -1676,6 +3009,7 @@ function renderStreamsView(ctx, stillSearching) {
   const filterRow = document.getElementById('streams-filter-row');
   const statusEl = document.getElementById('streams-status-bar');
   const listEl = document.getElementById('streams-cards-list');
+  const prevFilterScroll = filterRow.scrollLeft;
 
   const totalCount = streamGroups.reduce((acc, g) => acc + g.streams.length, 0);
   statusEl.textContent = stillSearching
@@ -1687,6 +3021,8 @@ function renderStreamsView(ctx, stillSearching) {
     `<button class="streams-provider-pill ${activeStreamFilter === 'all' ? 'active' : ''}" data-filter="all">Todos</button>`,
     ...streamGroups.map((g) => `<button class="streams-provider-pill ${activeStreamFilter === g.addon_id ? 'active' : ''}" data-filter="${esc(g.addon_id)}">${esc(g.addon_name)}</button>`),
   ].join('');
+  filterRow.scrollLeft = prevFilterScroll;
+  bindHorizontalDragScroll(filterRow);
 
   document.getElementById('btn-streams-refresh')?.addEventListener('click', () => openStreamsScreen(ctx));
   filterRow.querySelectorAll('[data-filter]').forEach((btn) => {
@@ -1748,6 +3084,40 @@ function renderStreamsView(ctx, stillSearching) {
     `;
   }).join('');
 
+  const playEntry = (s, g, url, headers, epSubtitle, forceExternal) => {
+    if (forceExternal) {
+      launchConnectedExternal(url, headers, s, ctx).catch((err) => showToast(String(err)));
+      return;
+    }
+    startInAppPlayback({
+      fileIdx: s.fileIdx,
+      url,
+      headers,
+      title: ctx.title,
+      subtitle: epSubtitle,
+      mediaType: ctx.mediaType,
+      contentId: ctx.contentId || ctx.videoId,
+      videoId: ctx.videoId,
+      tmdbId: ctx.tmdbId || null,
+      season: ctx.season ?? ctx.episode?.season ?? null,
+      episode: typeof ctx.episode === 'number'
+        ? ctx.episode
+        : (ctx.episode?.episode ?? ctx.episode?.number ?? null),
+      episodeThumbnail: ctx.episode?.thumbnail || '',
+      episodeTitle: ctx.episode?.title || ctx.episode?.name || '',
+      episodeOverview: ctx.episode?.overview || ctx.episode?.description || '',
+      background: ctx.background || '',
+      poster: ctx.poster || '',
+      logo: ctx.logo || '',
+      streamTitle: s.name || s.title || g.addon_name,
+      providerName: g.addon_name,
+      providerLogo: g.addon_logo || '',
+      addonId: g.addon_id,
+      startSecs: ctx.resumePositionSecs || 0,
+      videos: ctx.videos || [],
+    });
+  };
+
   listEl.querySelectorAll('[data-stream-idx]').forEach((btn) => {
     const entry = flatStreams[Number(btn.dataset.streamIdx)];
     const s = entry.stream;
@@ -1759,58 +3129,43 @@ function renderStreamsView(ctx, stillSearching) {
       : (s.name || '');
 
     btn.addEventListener('click', () => {
-      if (appSettings?.external_player_enabled) {
-        invoke('launch_mpv', { url, headers }).catch((err) => showToast(String(err)));
-        return;
-      }
-      startInAppPlayback({
-        url,
-        headers,
-        title: ctx.title,
-        subtitle: epSubtitle,
-        mediaType: ctx.mediaType,
-        contentId: ctx.contentId || ctx.videoId,
-        videoId: ctx.videoId,
-        tmdbId: ctx.tmdbId || null,
-        season: ctx.episode?.season ?? null,
-        episode: ctx.episode?.episode ?? ctx.episode?.number ?? null,
-        episodeTitle: ctx.episode?.title || ctx.episode?.name || '',
-        episodeOverview: ctx.episode?.overview || ctx.episode?.description || '',
-        background: ctx.background || '',
-        poster: ctx.poster || '',
-        logo: ctx.logo || '',
-        streamTitle: s.name || s.title || g.addon_name,
-        providerName: g.addon_name,
-        providerLogo: g.addon_logo || '',
-        addonId: g.addon_id,
-        startSecs: ctx.resumePositionSecs || 0,
-        videos: ctx.videos || [],
-      });
+      playEntry(s, g, url, headers, epSubtitle, Boolean(appSettings?.external_player_enabled));
     });
 
     btn.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       if (!url) return;
-      openPosterContextMenu({
-        id: ctx.contentId || ctx.videoId,
-        video_id: ctx.videoId,
-        type: ctx.mediaType,
-        name: s.name || g.addon_name,
-        poster: ctx.poster || '',
-        banner: ctx.background || '',
-      }, [
-        {
-          label: 'Abrir no mpv externo',
-          onClick: () => invoke('launch_mpv', { url, headers }).catch((err) => showToast(String(err))),
-        },
-        {
-          label: 'Copiar URL do stream',
-          onClick: async () => {
-            await navigator.clipboard?.writeText(url);
-            showToast('Link copiado!');
-          },
-        },
-      ]);
+      const popup = document.getElementById('stream-actions-popup');
+      if (!popup) return;
+      const icoCopy = '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2m0 16H8V7h11z"/></svg>';
+      const icoExt = '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M14 3v2h3.59l-9.83 9.83l1.41 1.41L19 6.41V10h2V3m-2 16H5V5h7V3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7h-2z"/></svg>';
+      const icoInt = '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>';
+      popup.innerHTML = `
+        <button type="button" class="stream-action-row" data-sa="copy">${icoCopy}<span>Copiar link</span></button>
+        <button type="button" class="stream-action-row" data-sa="internal">${icoInt}<span>Abrir em player interno</span></button>
+        <button type="button" class="stream-action-row" data-sa="external">${icoExt}<span>Abrir em player externo</span></button>
+      `;
+      popup.classList.remove('hidden');
+      const pw = popup.offsetWidth || 244;
+      const ph = popup.offsetHeight || 126;
+      const left = Math.max(8, Math.min(e.clientX, window.innerWidth - pw - 8));
+      const top = Math.max(8, Math.min(e.clientY, window.innerHeight - ph - 8));
+      popup.style.left = `${left}px`;
+      popup.style.top = `${top}px`;
+
+      popup.querySelector('[data-sa="copy"]').onclick = async () => {
+        closeStreamActionsPopup();
+        await navigator.clipboard?.writeText(url);
+        showToast('Link da stream copiado');
+      };
+      popup.querySelector('[data-sa="internal"]').onclick = () => {
+        closeStreamActionsPopup();
+        playEntry(s, g, url, headers, epSubtitle, false);
+      };
+      popup.querySelector('[data-sa="external"]').onclick = () => {
+        closeStreamActionsPopup();
+        playEntry(s, g, url, headers, epSubtitle, true);
+      };
     });
   });
 }
@@ -1821,6 +3176,534 @@ let playerUiEventUnlisten = null;
 let playerCurrentPaused = false;
 let playerSeeking = false;
 let playerActive = false;
+let partyLive = { active: false, members: [], playback: null, serverOffsetMs: 0, chatMessages: [], chatUnread: 0, chatReady: false };
+let lastPartyReport = 0;
+let lastPartyReportPos = -1;
+let lastPartyReportPaused = null;
+let lastPartySyncCheck = 0;
+let partySyncGuardUntil = 0;
+let partyLastAppliedSeq = null;
+let lastPartyWaiting = false;
+let lastPartyStatusSent = '';
+let partyNotice = { text: '', token: 0, pillUntil: 0 };
+
+function decodePartyBase64Url(encoded) {
+  const pad = '='.repeat((4 - (encoded.length % 4)) % 4);
+  const b64 = (encoded + pad).replace(/-/g, '+').replace(/_/g, '/');
+  const bin = atob(b64);
+  const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+function newPartyClientId() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let out = '';
+  for (let i = 0; i < 20; i += 1) {
+    out += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return out;
+}
+
+function formatPartyChatRows(messages, members) {
+  const byId = new Map((members || []).map((m) => [m.id, m]));
+  const gapMs = 5 * 60 * 1000;
+  return (messages || []).map((msg, idx, arr) => {
+    const prev = idx > 0 ? arr[idx - 1] : null;
+    const next = idx + 1 < arr.length ? arr[idx + 1] : null;
+    const showTime = !prev || ((Number(msg.sentAt) || 0) - (Number(prev.sentAt) || 0)) > gapMs;
+    const nextShowsTime = Boolean(next) && ((Number(next.sentAt) || 0) - (Number(msg.sentAt) || 0)) > gapMs;
+    const author = msg.memberId || msg.name || '';
+    const prevAuthor = prev ? (prev.memberId || prev.name || '') : '';
+    const nextAuthor = next ? (next.memberId || next.name || '') : '';
+    const member = byId.get(msg.memberId);
+    const displayName = msg.name || member?.name || 'Convidado';
+    const ts = Number(msg.sentAt) || 0;
+    const timeStr = showTime && ts > 0
+      ? new Date(ts).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+      : '';
+    return {
+      key: msg.key || String(msg.id || idx),
+      memberId: msg.memberId || '',
+      name: displayName,
+      initial: displayName.charAt(0).toUpperCase(),
+      imageUrl: msg.avatarUrl || member?.avatar || '',
+      color: msg.avatarColor || member?.color || '#1E88E5',
+      body: msg.body || '',
+      time: timeStr,
+      mine: Boolean(msg.mine),
+      sent: Boolean(msg.sent),
+      failed: Boolean(msg.failed),
+      startsGroup: showTime || prevAuthor !== author,
+      endsGroup: !next || nextShowsTime || nextAuthor !== author,
+      showTime,
+    };
+  });
+}
+
+function activePartyProfile() {
+  const profiles = authState?.profiles || [];
+  return profiles.find((p) => p.profile_index === authState?.active_profile_index) || profiles[0];
+}
+
+function partyIdentity() {
+  return {
+    displayName: activePartyProfile()?.name || 'Você',
+    avatarUrl: activePartyProfile()?.avatar_url || null,
+    avatarColor: activePartyProfile()?.avatar_color_hex || null,
+  };
+}
+
+function partyMediaKey() {
+  const c = activePlayerCtx;
+  if (!c) return '';
+  return [String(c.mediaType || '').toLowerCase(), c.contentId || c.videoId || '', c.season ?? '', c.episode ?? ''].join('|');
+}
+
+function isPartyMediaCompatible(expected, candidate) {
+  if (!expected || !candidate || expected === candidate) return true;
+  const e = String(expected).split('|');
+  const c = String(candidate).split('|');
+  if (e.length >= 4 && c.length >= 4) {
+    const eType = e[0] === 'tv' ? 'series' : e[0];
+    const cType = c[0] === 'tv' ? 'series' : c[0];
+    if (eType !== cType || e[2] !== c[2] || e[3] !== c[3]) return false;
+    const eTmdb = e[1].startsWith('tmdb:');
+    const cTmdb = c[1].startsWith('tmdb:');
+    const eImdb = e[1].startsWith('tt');
+    const cImdb = c[1].startsWith('tt');
+    if ((eTmdb && cImdb) || (eImdb && cTmdb)) return true;
+  }
+  return false;
+}
+
+function partyStreamMediaKey() {
+  if (playerActive && activePlayerCtx) return partyMediaKey();
+  const s = activeStreamCtx;
+  if (!s) return '';
+  const ep = typeof s.episode === 'number' ? s.episode : (s.episode?.episode ?? s.episode?.number ?? '');
+  const sea = s.season ?? s.episode?.season ?? '';
+  return [String(s.mediaType || '').toLowerCase(), s.contentId || s.videoId || '', sea ?? '', ep ?? ''].join('|');
+}
+
+function reportPartyPlayerStatus(status, mediaKey = null) {
+  if (!partyLive.active) {
+    lastPartyStatusSent = '';
+    return;
+  }
+  const key = mediaKey !== null ? mediaKey : (playerActive ? partyMediaKey() : partyStreamMediaKey());
+  const sig = `${partyLive.code || ''}|${status}|${key}`;
+  if (sig === lastPartyStatusSent) return;
+  lastPartyStatusSent = sig;
+  invoke('party_set_status', { status, mediaKey: key || null }).catch(() => {});
+}
+
+function partyMediaFromCtx() {
+  const c = activePlayerCtx;
+  if (!c) return null;
+  return {
+    type: c.mediaType || 'movie',
+    meta_id: c.contentId || c.videoId || '',
+    meta_type: c.mediaType || 'movie',
+    video_id: c.videoId || null,
+    season: c.season ?? null,
+    episode: c.episode ?? null,
+    title: c.title || c.name || c.streamTitle || 'Assistindo junto',
+    episode_title: c.episodeTitle || null,
+    poster: c.poster || null,
+    background: c.background || null,
+  };
+}
+
+function watchPartyState() {
+  const profile = activePartyProfile();
+  const name = profile?.name || 'Você';
+  const members = partyLive.members || [];
+  const max = Number(partyLive.maxMembers) || 3;
+  const active = Boolean(partyLive.active);
+  const isHost = Boolean(partyLive.isHost);
+  const pillActive = active && partyNotice.pillUntil > Date.now() && partyNotice.text;
+  const waitingNames = (partyLive.waitingFor || []).filter(Boolean);
+  const waitingMsg = waitingNames.length
+    ? `Aguardando ${waitingNames.join(', ')} escolher/carregar o player…`
+    : '';
+  const activeToastMsg = partyLive.error || (partyNotice.token && partyNotice.pillUntil > Date.now() ? partyNotice.text : '');
+  const activeToastToken = partyLive.error ? (partyLive.errorToken || 0) : (partyNotice.token || 0);
+  const memberStatusLabel = (m) => {
+    if (m.status === 'choosing') return 'Escolhendo player';
+    if (m.status === 'loading') return 'Carregando';
+    if (m.status === 'buffering') return 'Em buffer';
+    return m.isHost ? 'Anfitrião' : 'Pronto';
+  };
+  return {
+    available: true,
+    active,
+    isHost,
+    canEnd: isHost,
+    hostOnly: Boolean(partyLive.hostOnly),
+    connected: Boolean(partyLive.connected),
+    code: partyLive.code || '',
+    maxMembers: max,
+    seatsLabel: active ? `${members.length} de ${max}` : '',
+    nowWatching: partyLive.title || '',
+    pillPinned: active,
+    pillMessage: active ? (waitingMsg || (pillActive ? partyNotice.text : `Assistindo junto · ${partyLive.code || ''}`)) : '',
+    message: activeToastMsg,
+    messageToken: activeToastToken,
+    members: members.map((m) => {
+      const isSelf = Boolean(partyLive.memberId && m.id === partyLive.memberId);
+      const rawName = m.name || 'Convidado';
+      return {
+        id: m.id,
+        name: isSelf ? `${rawName} (você)` : rawName,
+        initial: rawName.charAt(0).toUpperCase(),
+        color: m.color || '#1E88E5',
+        imageUrl: m.avatar || '',
+        presence: partyLive.connected ? 'online' : 'offline',
+        status: memberStatusLabel(m),
+        isHost: Boolean(m.isHost),
+        canRemove: Boolean(isHost && !isSelf),
+        removeTitle: `Remover ${rawName}`,
+      };
+    }),
+    chat: {
+      unread: Number(partyLive.chatUnread) || 0,
+      ready: active,
+      messages: formatPartyChatRows(partyLive.chatMessages || [], members),
+    },
+    profile: {
+      name,
+      initial: name.charAt(0).toUpperCase(),
+      color: profile?.avatar_color_hex || '#1E88E5',
+      imageUrl: profile?.avatar_url || '',
+    },
+    labels: {
+      title: 'Watch party',
+      close: 'Fechar',
+      startTitle: 'Assista junto',
+      startDescription: 'Crie uma sala e convide quem quiser assistir com você, com reprodução sincronizada.',
+      startAction: 'Criar sala',
+      joinPlaceholder: 'Código da sala',
+      joinAction: 'Entrar',
+      experimental: 'Recurso experimental',
+      codeLabel: 'Código da sala',
+      reconnecting: 'Reconectando…',
+      copyInvite: 'Copiar código',
+      openSeat: 'Convidar participante',
+      host: 'Anfitrião',
+      hostOnlyTitle: 'Somente o anfitrião controla',
+      hostOnlyDescription: 'Impede que convidados pausem ou adiantem o vídeo.',
+      hostOnlyNote: 'Somente o anfitrião pode controlar a reprodução.',
+      shareTitle: 'Compartilhar reprodução',
+      shareDescription: 'Mostra na sala o que você está assistindo.',
+      catchUp: 'Sincronizar com o anfitrião',
+      watchWithParty: 'Assistir com a sala',
+      leave: 'Sair da sala',
+      end: 'Encerrar sala',
+      endTitle: 'Encerrar Watch party?',
+      endMessage: 'Todos os participantes serão desconectados.',
+      cancel: 'Cancelar',
+      remove: 'Remover',
+      removeMessage: 'Remover este participante da sala?',
+      tabParty: 'Sala',
+      tabChat: 'Chat',
+      chatPlaceholder: 'Mensagem…',
+      chatSend: 'Enviar',
+      chatEmptyTitle: 'Sem mensagens',
+      chatEmptyMessage: 'Converse com quem está na sala.',
+      chatNotSent: 'Não enviada. Toque para reenviar.',
+      chatNewMessages: 'Novas mensagens',
+    },
+    startNote: '',
+  };
+}
+
+function renderPartySettings() {
+  const status = document.getElementById('party-status');
+  const codeRow = document.getElementById('party-code-row');
+  const code = document.getElementById('party-code');
+  const membersRow = document.getElementById('party-members-row');
+  const members = document.getElementById('party-members');
+  const activeRow = document.getElementById('party-active-row');
+  const endBtn = document.getElementById('btn-party-end');
+  if (!status) return;
+  const view = partyLive;
+  if (view.active) {
+    const count = (view.members || []).length;
+    status.textContent = view.isHost
+      ? `Você é o anfitrião · ${view.title || 'sala ativa'}${view.connected ? '' : ' · reconectando…'}`
+      : `Na sala${view.title ? ` · ${view.title}` : ''}${view.connected ? '' : ' · reconectando…'}`;
+    codeRow.hidden = false;
+    code.textContent = view.code || '';
+    membersRow.hidden = false;
+    members.textContent = (view.members || [])
+      .map((m) => `${m.name}${m.isHost ? ' (anfitrião)' : ''}`)
+      .join(' · ') || `${count} participante(s)`;
+    activeRow.hidden = false;
+    endBtn.hidden = !view.isHost;
+    if (!view.isHost && view.hostOnly) status.textContent += ' · somente o anfitrião controla';
+  } else {
+    status.textContent = view.error || 'Nenhuma sala ativa.';
+    codeRow.hidden = true;
+    membersRow.hidden = true;
+    activeRow.hidden = true;
+  }
+}
+
+function formatPartyClock(secs) {
+  const total = Math.max(0, Math.floor(Number(secs) || 0));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
+function partyActionNoticeText(prev, next, view) {
+  if (!prev || !next || !next.memberId || next.memberId === view.memberId) return '';
+  if ((prev.mediaKey || '') !== (next.mediaKey || '')) return '';
+  const actor = (view.members || []).find((m) => m.id === next.memberId)?.name || 'Alguém';
+  if (Boolean(prev.paused) !== Boolean(next.paused)) {
+    return next.paused ? `${actor} pausou` : `${actor} retomou`;
+  }
+  const prevElapsed = prev.paused ? 0 : Math.max(0, (Number(next.atMs) || 0) - (Number(prev.atMs) || 0)) * (Number(prev.rate) || 1);
+  const prevExpected = (Number(prev.positionMs) || 0) + prevElapsed;
+  if (Math.abs((Number(next.positionMs) || 0) - prevExpected) > 2000) {
+    return `${actor} foi para ${formatPartyClock((Number(next.positionMs) || 0) / 1000)}`;
+  }
+  return '';
+}
+
+function applyPartyState(view) {
+  if (!view) return;
+  const previousError = partyLive.error || '';
+  if (partyLive.active && view.active && partyLive.code === view.code) {
+    const prevMembers = partyLive.members || [];
+    const nextMembers = view.members || [];
+    const prevIds = new Set(prevMembers.map((m) => m.id));
+    const nextIds = new Set(nextMembers.map((m) => m.id));
+    const joined = nextMembers.find((m) => !prevIds.has(m.id) && m.id !== view.memberId);
+    const left = prevMembers.find((m) => !nextIds.has(m.id) && m.id !== view.memberId);
+    if (joined) {
+      partyNotice = { text: `${joined.name || 'Alguém'} entrou na sala.`, token: Date.now(), pillUntil: Date.now() + 4000 };
+    } else if (left) {
+      partyNotice = { text: `${left.name || 'Alguém'} saiu da sala.`, token: Date.now(), pillUntil: Date.now() + 4000 };
+    } else {
+      const actionMsg = partyActionNoticeText(partyLive.playback, view.playback, view);
+      if (actionMsg) {
+        partyNotice = { text: actionMsg, token: Date.now(), pillUntil: Date.now() + 3000 };
+      }
+    }
+  } else if (!view.active) {
+    partyNotice = { text: '', token: 0, pillUntil: 0 };
+    partyLastAppliedSeq = null;
+    lastPartyReportPos = -1;
+    lastPartyReportPaused = null;
+    lastPartyWaiting = false;
+    lastPartyStatusSent = '';
+  }
+  partyLive = {
+    ...view,
+    errorToken: view.error && view.error !== previousError ? Date.now() : partyLive.errorToken,
+  };
+  renderPartySettings();
+  if (playerActive) pushPlayerControls();
+  if (!view.active && playerActive) {
+    invoke('player_set_speed', { speed: 1 }).catch(() => {});
+    return;
+  }
+  syncPartyPlayback(view, true);
+}
+
+// Follow party playback (PartySync.kt): pause + seek on >0.35s paused drift, seek on >1.2s playing drift, rate nudge below that.
+function syncPartyPlayback(view, fromRemote = false) {
+  if (!view?.active) return;
+  if (!playerActive || !activePlayerCtx) return;
+  const st = activePlayerCtx.latestState;
+  if (!st || !st.active || st.loading) return;
+  const playback = view.playback;
+  if (!playback || !playback.atMs) return;
+  const isWaiting = Boolean(playback.waiting) || Boolean(view.waitingFor && view.waitingFor.length > 0);
+  const waitingChanged = isWaiting !== lastPartyWaiting;
+  const isOriginator = Boolean(playback.memberId && view.memberId && playback.memberId === view.memberId);
+  if (isOriginator && !isWaiting && !waitingChanged && (partyLastAppliedSeq !== null || view.isHost)) return;
+  if (!isWaiting && !waitingChanged && view.hostOnly && playback.memberId && view.hostMemberId && playback.memberId !== view.hostMemberId) return;
+
+  const key = partyMediaKey();
+  if (playback.mediaKey && key && !isPartyMediaCompatible(playback.mediaKey, key)) {
+    if (fromRemote) notifyPlayerToast('O anfitrião está em outro episódio.');
+    return;
+  }
+
+  lastPartyWaiting = isWaiting;
+  const playbackIdentity = `${playback.seq ?? ''}:${playback.memberId ?? ''}`;
+  const isNewEvent = playbackIdentity !== partyLastAppliedSeq;
+  if (fromRemote && isNewEvent) partyLastAppliedSeq = playbackIdentity;
+
+  const rate = Number(playback.rate) || 1;
+  const serverNow = Date.now() + (Number(view.serverOffsetMs) || 0);
+  const effectivePaused = isWaiting || Boolean(playback.paused);
+  const elapsed = effectivePaused ? 0 : Math.max(0, serverNow - Number(playback.atMs)) * rate;
+  const target = Math.max(0, (Number(playback.positionMs) + elapsed) / 1000);
+  const current = Number(st.position_secs) || 0;
+  const drift = target - current;
+
+  if (effectivePaused) {
+    if (!st.paused) {
+      partySyncGuardUntil = Date.now() + 900;
+      invoke('player_set_paused', { paused: true }).catch(() => {});
+    }
+    if (Math.abs(drift) > 0.35) {
+      partySyncGuardUntil = Date.now() + 900;
+      invoke('player_seek', { secs: target }).catch(() => {});
+    }
+    if ((Number(st.speed) || 1) !== rate) {
+      invoke('player_set_speed', { speed: rate }).catch(() => {});
+    }
+    return;
+  }
+
+  if (st.paused) {
+    partySyncGuardUntil = Date.now() + 900;
+    invoke('player_set_paused', { paused: false }).catch(() => {});
+  }
+  if (Math.abs(drift) > 1.2) {
+    partySyncGuardUntil = Date.now() + 900;
+    invoke('player_seek', { secs: target }).catch(() => {});
+  } else if (Math.abs(drift) > 0.2) {
+    invoke('player_set_speed', { speed: drift > 0 ? rate * 1.05 : rate * 0.95 }).catch(() => {});
+  } else if (Math.abs(drift) < 0.08 && Math.abs((Number(st.speed) || 1) - rate) > 0.01) {
+    invoke('player_set_speed', { speed: rate }).catch(() => {});
+  }
+}
+
+function partyReportTick(state, force = false) {
+  if (!partyLive.active || !state || !state.active || state.loading) return;
+  if (partyLive.waitingFor?.length || partyLive.playback?.waiting) return;
+  const canControl = Boolean(!partyLive.hostOnly || partyLive.isHost);
+  if (!canControl) return;
+  if (!force && Date.now() < partySyncGuardUntil) return;
+  const now = Date.now();
+  const posSecs = Number(state.position_secs) || 0;
+  const paused = Boolean(state.paused);
+  const rate = Number(state.speed) || 1;
+  const pausedChanged = lastPartyReportPaused !== null && lastPartyReportPaused !== paused;
+  const dtSecs = lastPartyReport > 0 ? Math.max(0, (now - lastPartyReport) / 1000) : 0;
+  const expectedPos = lastPartyReportPos < 0
+    ? posSecs
+    : (lastPartyReportPaused ? lastPartyReportPos : lastPartyReportPos + dtSecs * rate);
+  const jumped = lastPartyReportPos >= 0 && Math.abs(posSecs - expectedPos) > 1.5;
+  if (!force && lastPartyReportPos >= 0 && !pausedChanged && !jumped && now - lastPartyReport < 8000) return;
+  lastPartyReport = now;
+  lastPartyReportPos = posSecs;
+  lastPartyReportPaused = paused;
+  invoke('party_report_playback', {
+    positionMs: Math.round(posSecs * 1000),
+    paused,
+    rate,
+    mediaKey: partyMediaKey(),
+  }).catch(() => {});
+}
+
+async function partyCreate() {
+  const media = partyMediaFromCtx();
+  if (!media) {
+    showToast('Abra um vídeo antes de criar a sala.');
+    return;
+  }
+  const status = document.getElementById('party-status');
+  if (status) status.textContent = 'Criando sala…';
+  try {
+    lastPartyStatusSent = '';
+    applyPartyState(await invoke('party_create', { ...partyIdentity(), media }));
+    if (playerActive && activePlayerCtx?.latestState?.active) {
+      const st = activePlayerCtx.latestState;
+      reportPartyPlayerStatus(st.loading ? (activePlayerCtx.hadFirstReady ? 'buffering' : 'loading') : 'ready', partyMediaKey());
+      if (!st.loading) partyReportTick(st, true);
+    }
+  } catch (error) {
+    const msg = String(error);
+    if (status) status.textContent = msg;
+    partyLive = { ...partyLive, error: msg, errorToken: Date.now() };
+    if (playerActive) pushPlayerControls();
+  }
+}
+
+async function partyJoinByCode(rawCode) {
+  const code = String(rawCode || '').trim().toUpperCase();
+  if (code.length < 4) {
+    showToast('Informe o código da sala.');
+    return;
+  }
+  const status = document.getElementById('party-status');
+  if (status) status.textContent = 'Entrando…';
+  try {
+    const view = await invoke('party_join', { code, ...partyIdentity() });
+    lastPartyStatusSent = '';
+    applyPartyState(view);
+    if (playerActive && activePlayerCtx?.latestState?.active) {
+      const st = activePlayerCtx.latestState;
+      reportPartyPlayerStatus(st.loading ? (activePlayerCtx.hadFirstReady ? 'buffering' : 'loading') : 'ready', partyMediaKey());
+    } else if (!playerActive && view?.media?.meta_id) {
+      const m = view.media;
+      const mediaType = m.meta_type || m.type || 'movie';
+      const meta = await invoke('fetch_meta_details', { mediaType, id: m.meta_id }).catch(() => null);
+      const videos = Array.isArray(meta?.videos) ? meta.videos : [];
+      const epObj = (m.season != null && m.episode != null)
+        ? (videos.find((v) => Number(v.season) === Number(m.season) && Number(v.episode ?? v.number) === Number(m.episode))
+          || { season: m.season, episode: m.episode, title: m.episode_title || '' })
+        : null;
+      openStreamsScreen({
+        mediaType,
+        contentId: m.meta_id,
+        videoId: m.video_id || m.meta_id,
+        tmdbId: meta?.tmdb_id || null,
+        season: m.season ?? null,
+        episode: epObj,
+        title: meta?.name || m.title || view.title || 'Assistindo junto',
+        poster: meta?.poster || m.poster || '',
+        background: meta?.background || meta?.banner || m.background || '',
+        logo: meta?.logo || '',
+        videos,
+        resumePositionSecs: 0,
+      });
+    } else if (activeTabName() === 'streams') {
+      reportPartyPlayerStatus('choosing', partyStreamMediaKey());
+    }
+    return true;
+  } catch (error) {
+    const msg = String(error);
+    if (status) status.textContent = msg;
+    partyLive = { ...partyLive, error: msg, errorToken: Date.now() };
+    if (playerActive) pushPlayerControls();
+    return false;
+  }
+}
+
+async function partyJoin() {
+  const input = document.getElementById('party-join-code');
+  const ok = await partyJoinByCode(input?.value);
+  if (ok && input) input.value = '';
+}
+
+listen('party:state', (event) => applyPartyState(event.payload)).catch(() => {});
+document.getElementById('btn-party-join')?.addEventListener('click', partyJoin);
+document.getElementById('party-join-code')?.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') partyJoin();
+});
+async function partyRefreshStatus() {
+  try { applyPartyState(await invoke('party_status')); } catch { /* offline */ }
+}
+
+document.getElementById('btn-party-leave')?.addEventListener('click', async () => {
+  try { await invoke('party_leave'); } catch (error) { showToast(String(error)); }
+  partyRefreshStatus();
+});
+document.getElementById('btn-party-end')?.addEventListener('click', async () => {
+  try { await invoke('party_end'); } catch (error) { showToast(String(error)); }
+  partyRefreshStatus();
+});
+invoke('party_status').then(applyPartyState).catch(() => {});
+
 let activePlayerCtx = null;
 
 function getPlayerStageBounds() {
@@ -1990,6 +3873,7 @@ function buildPlayerControlsObject(extra = {}) {
 
   return {
     title: ctx.title || '',
+    seekPreview: ctx.seekPreview,
     episodeText: ctx.subtitle || '',
     streamTitle: ctx.streamTitle || '',
     providerName: ctx.providerName || '',
@@ -2125,6 +4009,7 @@ function buildPlayerControlsObject(extra = {}) {
     closeModalsToken: ctx.closeModalsToken || 0,
     submitIntroSuccessToken: ctx.submitIntroSuccessToken || 0,
     controlsVisible: ctx.controlsVisible !== false,
+    party: watchPartyState(),
     ...extra,
   };
 }
@@ -2203,7 +4088,8 @@ async function fetchAddonSubtitlesForPlayer() {
 async function syncActivePlayerWatchProgress(force = false) {
   const ctx = activePlayerCtx;
   const st = ctx?.latestState;
-  if (!ctx || !st || st.duration_secs <= 10) return;
+  if (!ctx?.contentId || !st || st.duration_secs <= 10) return;
+  if (simklUses('progress')) return;
   const now = Date.now();
   if (!force && now - (ctx.lastProgressSyncMs || 0) < 25000) return;
   ctx.lastProgressSyncMs = now;
@@ -2264,11 +4150,104 @@ async function handlePlayerUiEvent({ event_type: type, value }) {
     ctx.controlsVisible = !ctx.controlsVisible;
     return;
   }
-  if (type === 'setPlaybackState') {
-    ctx.controlsVisible = true;
+  if (type === 'setPlaybackState' || type === 'setPlaybackStateQuiet' || type === 'toggle' || type === 'keyboardToggle' || type === 'scrubFinish' || type === 'seekBack' || type === 'seekForward' || type === 'setPlaybackSpeed') {
+    if (partyLive.active && partyLive.waitingFor?.length) {
+      invoke('player_set_paused', { paused: true }).catch(() => {});
+      notifyPlayerToast(`Aguardando ${partyLive.waitingFor.join(', ')} escolher/carregar o player.`);
+      return;
+    }
+    if (partyLive.active && partyLive.hostOnly && !partyLive.isHost) {
+      notifyPlayerToast('Somente o anfitrião pode controlar a reprodução.');
+      syncPartyPlayback(partyLive, false);
+      return;
+    }
+    if (type === 'setPlaybackState') {
+      ctx.controlsVisible = true;
+    }
+    const st = ctx.latestState;
+    if (partyLive.active && st) {
+      let nextPaused = Boolean(st.paused);
+      let nextPos = Number(st.position_secs) || 0;
+      let nextRate = Number(st.speed) || 1;
+      if (type === 'setPlaybackState' || type === 'setPlaybackStateQuiet') nextPaused = value < 0.5;
+      else if (type === 'toggle' || type === 'keyboardToggle') nextPaused = !nextPaused;
+      else if (type === 'scrubFinish') nextPos = Math.max(0, value / 1000);
+      else if (type === 'seekBack') nextPos = Math.max(0, nextPos - 10);
+      else if (type === 'seekForward') nextPos = Math.max(0, nextPos + 10);
+      else if (type === 'setPlaybackSpeed') nextRate = Math.min(4, Math.max(0.25, value));
+      partyReportTick({ ...st, paused: nextPaused, position_secs: nextPos, speed: nextRate }, true);
+    }
+    return;
   }
   if (type === 'back') {
     await closeEmbeddedPlayer();
+    return;
+  }
+  if (type === 'partyStart') {
+    await partyCreate();
+    pushPlayerControls();
+    return;
+  }
+  if (type.startsWith('partyJoinCode:')) {
+    await partyJoinByCode(type.slice('partyJoinCode:'.length));
+    pushPlayerControls();
+    return;
+  }
+  if (type === 'partyCopyInvite') {
+    if (partyLive.code) {
+      navigator.clipboard?.writeText(partyLive.code).catch(() => {});
+      notifyPlayerToast(`Código copiado: ${partyLive.code}`);
+    }
+    return;
+  }
+  if (type === 'partyLeave') {
+    try { await invoke('party_leave'); } catch (error) { showToast(String(error)); }
+    await partyRefreshStatus();
+    pushPlayerControls();
+    return;
+  }
+  if (type === 'partyEnd') {
+    try { await invoke('party_end'); } catch (error) { showToast(String(error)); }
+    await partyRefreshStatus();
+    pushPlayerControls();
+    return;
+  }
+  if (type === 'partyCatchUp' || type === 'partyWatch') {
+    partyLastAppliedSeq = null;
+    syncPartyPlayback(partyLive, true);
+    pushPlayerControls();
+    return;
+  }
+  if (type === 'partyHostOnly') {
+    try {
+      applyPartyState(await invoke('party_set_host_only', { hostOnly: value >= 0.5 }));
+      pushPlayerControls();
+    } catch (error) { showToast(String(error)); }
+    return;
+  }
+  if (type === 'partyChatVisible') {
+    try { applyPartyState(await invoke('party_set_chat_open', { open: value >= 0.5 })); } catch {}
+    return;
+  }
+  if (type.startsWith('partyChatSend:')) {
+    const encoded = type.slice('partyChatSend:'.length);
+    let body = '';
+    try { body = decodePartyBase64Url(encoded); } catch { body = ''; }
+    if (body.trim()) {
+      try {
+        applyPartyState(await invoke('party_send_message', { body, clientId: newPartyClientId() }));
+      } catch (error) { showToast(String(error)); }
+    }
+    return;
+  }
+  if (type.startsWith('partyChatRetry:')) {
+    const key = type.slice('partyChatRetry:'.length);
+    try { applyPartyState(await invoke('party_retry_message', { key })); } catch (error) { showToast(String(error)); }
+    return;
+  }
+  if (type.startsWith('partyRemoveMember:')) {
+    const memberId = type.slice('partyRemoveMember:'.length);
+    try { applyPartyState(await invoke('party_remove_member', { memberId })); } catch (error) { showToast(String(error)); }
     return;
   }
   if (type === 'toggleFullscreen') {
@@ -2283,7 +4262,7 @@ async function handlePlayerUiEvent({ event_type: type, value }) {
     return;
   }
   if (type === 'externalPlayer') {
-    await invoke('launch_mpv', { url: ctx.url, headers: ctx.headers || null }).catch((e) => showToast(String(e)));
+    await invoke('launch_mpv', { url: ctx.url, headers: ctx.headers || null, anime: playbackIsAnime(ctx) }).catch((e) => showToast(String(e)));
     return;
   }
   if (type === 'selectAudioTrack') {
@@ -2291,6 +4270,8 @@ async function handlePlayerUiEvent({ event_type: type, value }) {
     return;
   }
   if (type === 'selectBuiltInSubtitleTrack') {
+    cancelSubtitleSync(ctx, true);
+    ctx.prefTracksApplied = true;
     const tid = Math.round(value);
     ctx.selectedAddonIndex = -1;
     ctx.activeAddonSub = null;
@@ -2310,12 +4291,15 @@ async function handlePlayerUiEvent({ event_type: type, value }) {
     const idx = Math.round(value);
     const sub = ctx.addonSubtitles[idx];
     if (!sub) return;
+    cancelSubtitleSync(ctx, true);
+    ctx.prefTracksApplied = true;
     ctx.selectedAddonIndex = idx;
     ctx.activeAddonSub = sub;
     ctx.activeSubOptionId = `addon:${sub.id || idx}`;
     ctx.autoSyncedApplied = false;
     await invoke('player_clear_external_subtitles');
     await invoke('player_add_subtitle_url', { url: sub.url });
+    if (appSettings.playback.subtitle_sync && activePlayerCtx === ctx && ctx.activeAddonSub === sub) beginSubtitleSync(ctx, sub);
     pushPlayerControls();
     return;
   }
@@ -2324,12 +4308,14 @@ async function handlePlayerUiEvent({ event_type: type, value }) {
     return;
   }
   if (type === 'subtitleDelayDelta') {
+    cancelSubtitleSync(ctx);
     ctx.subtitleDelayMs += Math.round(value);
     await invoke('player_set_subtitle_delay', { delayMs: ctx.subtitleDelayMs });
     pushPlayerControls();
     return;
   }
   if (type === 'subtitleDelayReset') {
+    cancelSubtitleSync(ctx);
     ctx.subtitleDelayMs = 0;
     await invoke('player_set_subtitle_delay', { delayMs: 0 });
     pushPlayerControls();
@@ -2363,6 +4349,7 @@ async function handlePlayerUiEvent({ event_type: type, value }) {
     const cueIdx = Math.round(value);
     const cue = (ctx.allCuesForLookup || ctx.capturedCues || []).find((c) => c.index === cueIdx);
     if (!cue || ctx.capturedPosMs < 0) return;
+    cancelSubtitleSync(ctx);
     ctx.subtitleDelayMs = Math.round(ctx.capturedPosMs - cue.timeMs);
     ctx.autoSyncedApplied = true;
     await invoke('player_set_subtitle_delay', { delayMs: ctx.subtitleDelayMs });
@@ -2395,6 +4382,7 @@ async function handlePlayerUiEvent({ event_type: type, value }) {
       await startInAppPlayback({
         ...ctx,
         url: sel.url,
+        fileIdx: sel.stream.fileIdx,
         headers: sel.stream.behaviorHints?.proxyHeaders?.request || null,
         streamTitle: sel.stream.name || sel.group.addon_name,
         providerName: sel.group.addon_name,
@@ -2449,10 +4437,12 @@ async function handlePlayerUiEvent({ event_type: type, value }) {
       await startInAppPlayback({
         ...ctx,
         url: sel.url,
+        fileIdx: sel.stream.fileIdx,
         headers: sel.stream.behaviorHints?.proxyHeaders?.request || null,
         videoId: ep.id || ctx.contentId,
         season: s,
         episode: e,
+        episodeThumbnail: ep.thumbnail || '',
         episodeTitle: ep.title || ep.name || '',
         episodeOverview: ep.overview || ep.description || '',
         subtitle: `T${s} E${e} • ${ep.title || ep.name || ''}`,
@@ -2613,10 +4603,12 @@ async function loadPlayerDrawerEpisodeStreams(ep, autoPlayIfMatched = false) {
         await startInAppPlayback({
           ...ctx,
           url: preferred.url,
+          fileIdx: preferred.stream.fileIdx,
           headers: preferred.stream.behaviorHints?.proxyHeaders?.request || null,
           videoId: ep.id || ctx.contentId,
           season: s,
           episode: e,
+          episodeThumbnail: ep.thumbnail || '',
           episodeTitle: ep.title || ep.name || '',
           episodeOverview: ep.overview || ep.description || '',
           subtitle: `T${s} E${e} • ${ep.title || ep.name || ''}`,
@@ -2646,15 +4638,33 @@ async function loadPlayerDrawerEpisodeStreams(ep, autoPlayIfMatched = false) {
   });
 }
 
+function playbackIsAnime(ctx) {
+  const id = ctx.contentId || ctx.videoId || '';
+  if (ctx.mediaType === 'anime' || /^(kitsu|mal|anilist):/i.test(id)) return true;
+  if (id !== activeMetaContext?.id) return false;
+  const meta = activeMetaContext.full || activeMetaContext;
+  const genres = Array.isArray(meta.genres) ? meta.genres : [];
+  return genres.some(g => /^anime$/i.test(g)) ||
+    (genres.some(g => /^(animation|animação)$/i.test(g)) && /japan|japão|日本|\bJP\b/i.test(meta.country || ''));
+}
+
 async function startInAppPlayback(req) {
+  try { req = await resolveConnectedMedia(req); }
+  catch (e) { showToast(String(e)); return; }
+  if (activePlayerCtx) await simklSendScrobble(activePlayerCtx,activePlayerCtx.latestState,true);
+  const simklResume = simklUses('progress') && !req.startSecs && simklProgressCards().find(card =>
+    simklProgressMatches(card, req.contentId) && (card.episode ?? null) === (req.episode ?? null) &&
+      (card.season ?? null) === (req.season ?? null));
   await invoke('player_stop').catch(() => {});
-  showView('view-player');
   playerActive = true;
   playerCurrentPaused = false;
 
   const subStyleCopy = { ...DEFAULT_SUBTITLE_STYLE, ...(appSettings?.subtitle_style || {}) };
   activePlayerCtx = {
     ...req,
+    simklResumePercent: simklResume?.progress_percent || 0,
+    seekPreview: null,
+    seekPreviewAfter: 0,
     resizeMode: 0,
     isFullscreen: false,
     addonSubtitles: [],
@@ -2689,9 +4699,14 @@ async function startInAppPlayback(req) {
     prefTracksApplied: false,
     controlsVisible: true,
     lastProgressSyncMs: Date.now(),
+    discordWatchedMs: 0,
+    discordTickAt: 0,
+    discordStart: null,
     latestState: null,
   };
 
+  showView('view-player');
+  reportPartyPlayerStatus('loading', partyMediaKey());
   const playerShell = document.getElementById('player-shell');
   playerShell.classList.remove('overlay-active', 'fallback-active');
   if (appSettings?.external_player_enabled) {
@@ -2709,9 +4724,52 @@ async function startInAppPlayback(req) {
   playerStateUnlisten = await listen('player:state', (event) => {
     const st = event.payload;
     if (!activePlayerCtx) return;
+    const previousActive = activePlayerCtx.latestState?.active;
+    const previousEnded = activePlayerCtx.latestState?.ended;
     const wasPaused = activePlayerCtx.latestState?.paused;
     const wasLoading = activePlayerCtx.latestState?.loading;
     activePlayerCtx.latestState = st;
+    if (st.active) {
+      if (!st.loading) activePlayerCtx.hadFirstReady = true;
+      if (partyLive.active) {
+        const memberStatus = st.loading ? (activePlayerCtx.hadFirstReady ? 'buffering' : 'loading') : 'ready';
+        reportPartyPlayerStatus(memberStatus, partyMediaKey());
+      }
+    }
+    if (wasLoading && !st.loading && partyLive.active) {
+      partyLastAppliedSeq = null;
+      syncPartyPlayback(partyLive, true);
+    }
+    partyReportTick(st, wasPaused !== undefined && Boolean(wasPaused) !== Boolean(st.paused));
+    if (partyLive.active && Date.now() - lastPartySyncCheck >= 450) {
+      lastPartySyncCheck = Date.now();
+      syncPartyPlayback(partyLive, false);
+    }
+    if (st.active && !st.loading) loadSeekPreview(activePlayerCtx, st.duration_secs);
+    if (!st.loading && st.active && st.duration_secs > 10 && activePlayerCtx.simklResumePercent) {
+      const target = st.duration_secs * activePlayerCtx.simklResumePercent / 100;
+      activePlayerCtx.simklResumePercent = 0;
+      invoke('player_seek',{secs:target}).catch(e => showToast(String(e)));
+    } else if (st.active || st.ended) {
+      simklSendScrobble(activePlayerCtx,st);
+    }
+    observeSubtitleSync(activePlayerCtx, st);
+    const nowMs = Date.now();
+    const isWatching = Boolean(st.active && !st.paused && !st.loading && !st.ended);
+    const wasWatching = Boolean(activePlayerCtx.discordTickAt);
+    if (isWatching) {
+      if (wasWatching) {
+        activePlayerCtx.discordWatchedMs += Math.min(2000, Math.max(0, nowMs - activePlayerCtx.discordTickAt));
+      }
+      activePlayerCtx.discordTickAt = nowMs;
+      if (!activePlayerCtx.discordStart || !wasWatching) {
+        activePlayerCtx.discordStart = Math.floor((nowMs - activePlayerCtx.discordWatchedMs) / 1000);
+      }
+    } else if (wasWatching) {
+      activePlayerCtx.discordWatchedMs += Math.min(2000, Math.max(0, nowMs - activePlayerCtx.discordTickAt));
+      activePlayerCtx.discordTickAt = 0;
+    }
+    if (wasWatching !== isWatching || wasPaused !== st.paused || previousActive !== st.active || previousEnded !== st.ended) syncDiscord();
     updateFallbackPlayerUi(st);
     if (wasLoading !== undefined && Boolean(wasLoading) !== Boolean(st.loading)) {
       pushPlayerControls();
@@ -2777,6 +4835,7 @@ async function startInAppPlayback(req) {
     const initialObj = buildPlayerControlsObject();
     try {
       const mode = await invoke('player_play', {
+        anime: playbackIsAnime(req),
         url: req.url,
         headers: req.headers || null,
         x: b.x,
@@ -2830,17 +4889,23 @@ function updateFallbackPlayerUi(st) {
   }
 
   const subSel = document.getElementById('player-sub-select');
-  const subKey = st.subtitle_tracks.map((t) => `${t.id}:${t.selected}`).join(',');
+  const ctx = activePlayerCtx;
+  const addons = ctx?.addonSubtitles || [];
+  const activeAddon = ctx?.selectedAddonIndex ?? -1;
+  const subKey = JSON.stringify([st.subtitle_tracks.map(t => [t.id, t.selected]), addons.map(a => a.url), activeAddon]);
   if (subSel.dataset.key !== subKey) {
     subSel.dataset.key = subKey;
-    const noneSelected = !st.subtitle_tracks.some((t) => t.selected);
-    subSel.innerHTML = `<option value="no" ${noneSelected ? 'selected' : ''}>Legendas: Desativadas</option>` +
-      st.subtitle_tracks.map((t) => `<option value="${t.id}" ${t.selected ? 'selected' : ''}>Leg: ${esc(t.lang || t.title || `#${t.id}`)}</option>`).join('');
+    const none = activeAddon < 0 && !st.subtitle_tracks.some(t => t.selected);
+    subSel.innerHTML = `<option value="-1" ${none ? 'selected' : ''}>Legendas: Desativadas</option>` +
+      st.subtitle_tracks.map(t => `<option value="${t.id}" ${activeAddon < 0 && t.selected ? 'selected' : ''}>Leg: ${esc(t.lang || t.title || `#${t.id}`)}</option>`).join('') +
+      addons.map((s, i) => `<option value="addon:${i}" ${activeAddon === i ? 'selected' : ''}>${esc(s.addon_name || 'Addon')} · ${esc(languageLabelPt(s.lang))}</option>`).join('');
   }
 }
 
 async function closeEmbeddedPlayer() {
+  fallbackSeekPreview.hide();
   if (!playerActive) return;
+  if (activePlayerCtx) await simklSendScrobble(activePlayerCtx,activePlayerCtx.latestState,true);
   await syncActivePlayerWatchProgress(true);
   playerActive = false;
   activePlayerCtx = null;
@@ -2849,6 +4914,10 @@ async function closeEmbeddedPlayer() {
   if (playerUiEventUnlisten) { playerUiEventUnlisten(); playerUiEventUnlisten = null; }
   await invoke('player_stop');
   showView('view-app');
+  if (partyLive.active) {
+    const inStreams = activeTabName() === 'streams';
+    reportPartyPlayerStatus(inStreams ? 'choosing' : 'browsing', inStreams ? partyStreamMediaKey() : '');
+  }
   refreshContinueWatching();
 }
 
@@ -2857,23 +4926,44 @@ window.addEventListener('resize', () => {
   invoke('player_set_bounds', getPlayerStageBounds());
 });
 
+function blockFallbackControlIfPartyLocked() {
+  if (partyLive.active && partyLive.waitingFor?.length) {
+    invoke('player_set_paused', { paused: true }).catch(() => {});
+    showToast(`Aguardando ${partyLive.waitingFor.join(', ')} escolher/carregar o player.`);
+    return true;
+  }
+  if (partyLive.active && partyLive.hostOnly && !partyLive.isHost) {
+    showToast('Somente o anfitrião pode controlar a reprodução.');
+    return true;
+  }
+  return false;
+}
+
 document.getElementById('btn-player-back').addEventListener('click', closeEmbeddedPlayer);
 document.getElementById('btn-player-playpause').addEventListener('click', () => {
+  if (blockFallbackControlIfPartyLocked()) return;
   invoke('player_set_paused', { paused: !playerCurrentPaused });
 });
 document.getElementById('btn-player-back10').addEventListener('click', () => {
+  if (blockFallbackControlIfPartyLocked()) return;
   const cur = Number(document.getElementById('player-seek').value) || 0;
   invoke('player_seek', { secs: Math.max(0, cur - 10) });
 });
 document.getElementById('btn-player-fwd10').addEventListener('click', () => {
+  if (blockFallbackControlIfPartyLocked()) return;
   const cur = Number(document.getElementById('player-seek').value) || 0;
   invoke('player_seek', { secs: cur + 10 });
 });
 
 const seekInput = document.getElementById('player-seek');
+const fallbackSeekPreview = bindSeekPreview(seekInput, () => activePlayerCtx?.seekPreview, () => Number(seekInput.max) * 1000);
+seekInput.addEventListener('keyup', ev => {
+  if (['ArrowLeft','ArrowRight','Home','End','PageUp','PageDown'].includes(ev.key)) fallbackSeekPreview.show('keyboard', Number(seekInput.value) * 1000);
+});
 seekInput.addEventListener('input', () => { playerSeeking = true; });
 seekInput.addEventListener('change', () => {
   playerSeeking = false;
+  if (blockFallbackControlIfPartyLocked()) return;
   invoke('player_seek', { secs: Number(seekInput.value) });
 });
 document.getElementById('player-volume').addEventListener('input', (e) => {
@@ -2886,7 +4976,10 @@ document.getElementById('player-audio-select').addEventListener('change', (e) =>
   invoke('player_set_audio', { aid: e.target.value });
 });
 document.getElementById('player-sub-select').addEventListener('change', (e) => {
-  invoke('player_set_subtitle', { sid: e.target.value });
+  const option = e.target.value;
+  const addon = option.startsWith('addon:');
+  handlePlayerUiEvent({ event_type: addon ? 'selectAddonSubtitle' : 'selectBuiltInSubtitleTrack',
+    value: Number(addon ? option.slice(6) : option) }).catch(error => notifyPlayerToast(String(error)));
 });
 document.getElementById('btn-player-fullscreen').addEventListener('click', () => {
   invoke('window_toggle_fullscreen');
@@ -2895,8 +4988,8 @@ document.getElementById('btn-player-fullscreen').addEventListener('click', () =>
 // --- SEARCH & DISCOVER (100% Addons + Recent Searches + Dropdowns) ---
 let searchSeq = 0;
 let searchDebounceTimer = null;
-let searchUnlistenSection = null;
-let searchUnlistenDone = null;
+let searchListeners;
+let activeSearchQuery = '';
 const searchSectionsMap = new Map();
 
 let discoverCatalogs = [];
@@ -2906,6 +4999,7 @@ let discoverSelectedGenre = null;
 let discoverItems = [];
 let discoverSeen = new Set();
 let discoverLoading = false;
+let discoverRequest = 0;
 let discoverHasMore = false;
 
 const searchInputEl = document.getElementById('search-input');
@@ -2968,7 +5062,6 @@ function renderRecentSearches() {
 function syncSearchModeUi() {
   const hasQuery = searchInputEl.value.trim().length > 0;
   searchClearBtn.classList.toggle('hidden', searchInputEl.value.length === 0);
-  document.getElementById('discover-section').classList.toggle('hidden', hasQuery);
   document.getElementById('search-results').classList.toggle('hidden', !hasQuery);
   renderRecentSearches();
   if (!hasQuery) {
@@ -2976,14 +5069,21 @@ function syncSearchModeUi() {
   }
 }
 
-document.getElementById('btn-search').addEventListener('click', () => {
+document.getElementById('search-form').addEventListener('submit', (event) => {
+  event.preventDefault();
   clearTimeout(searchDebounceTimer);
   runSearch();
 });
 
+function cancelAddonSearch() {
+  const seq = ++searchSeq;
+  activeSearchQuery = '';
+  invoke('start_addon_search', { query: '', seq }).catch(console.error);
+}
+
 searchClearBtn.addEventListener('click', () => {
   clearTimeout(searchDebounceTimer);
-  searchSeq += 1;
+  cancelAddonSearch();
   searchInputEl.value = '';
   searchSectionsMap.clear();
   document.getElementById('search-results').innerHTML = '';
@@ -2991,24 +5091,13 @@ searchClearBtn.addEventListener('click', () => {
   searchInputEl.focus();
 });
 
-searchInputEl.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    clearTimeout(searchDebounceTimer);
-    runSearch();
-  }
-});
-
 searchInputEl.addEventListener('input', () => {
   syncSearchModeUi();
   clearTimeout(searchDebounceTimer);
-  const q = searchInputEl.value.trim();
-  if (!q) {
-    searchSeq += 1;
-    searchSectionsMap.clear();
-    document.getElementById('search-results').innerHTML = '';
-    return;
-  }
-  searchDebounceTimer = setTimeout(runSearch, 350);
+  if (activeSearchQuery) cancelAddonSearch();
+  searchSectionsMap.clear();
+  document.getElementById('search-results').replaceChildren();
+  if (searchInputEl.value.trim()) searchDebounceTimer = setTimeout(runSearch, 350);
 });
 
 async function runSearch() {
@@ -3016,45 +5105,44 @@ async function runSearch() {
   const status = document.getElementById('search-status');
   const resultsEl = document.getElementById('search-results');
   syncSearchModeUi();
-  if (!query) return;
+  if (!query || query === activeSearchQuery) return;
 
+  activeSearchQuery = query;
   saveRecentSearch(query);
   const seq = ++searchSeq;
   searchSectionsMap.clear();
   resultsEl.innerHTML = '';
   status.textContent = 'Buscando nos addons…';
 
-  if (searchUnlistenSection) { searchUnlistenSection(); searchUnlistenSection = null; }
-  if (searchUnlistenDone) { searchUnlistenDone(); searchUnlistenDone = null; }
-
-  searchUnlistenSection = await listen('search:section', (event) => {
-    const payload = event.payload;
-    if (payload.seq !== searchSeq) return;
-    const sec = { ...payload.section, searchQuery: query };
-    searchSectionsMap.set(sec.order, sec);
-    status.textContent = '';
-    appendShelfOrdered(resultsEl, sec, searchSectionsMap);
-  });
-
-  searchUnlistenDone = await listen('search:done', (event) => {
-    const payload = event.payload;
-    if (payload.seq !== searchSeq) return;
-    if (searchSectionsMap.size === 0) {
-      status.textContent = payload.total === 0
-        ? 'Nenhum addon ativo possui catálogo com suporte a busca.'
-        : 'Nenhum resultado encontrado nos addons instalados.';
-    } else {
-      status.textContent = '';
-    }
-  });
-
   try {
+    searchListeners ||= Promise.all([
+      listen('search:section', (event) => {
+        const payload = event.payload;
+        if (payload.seq !== searchSeq) return;
+        const sec = { ...payload.section, searchQuery: activeSearchQuery };
+        searchSectionsMap.set(sec.order, sec);
+        status.textContent = '';
+        appendShelfOrdered(resultsEl, sec, searchSectionsMap);
+      }),
+      listen('search:done', (event) => {
+        const payload = event.payload;
+        if (payload.seq !== searchSeq) return;
+        status.textContent = searchSectionsMap.size ? '' : payload.total === 0
+          ? 'Nenhum addon ativo possui catálogo com suporte a busca.'
+          : 'Nenhum resultado encontrado nos addons instalados.';
+      }),
+    ]);
+    await searchListeners;
+    if (seq !== searchSeq) return;
     const ack = await invoke('start_addon_search', { query, seq });
     if (ack.total === 0 && seq === searchSeq) {
       status.textContent = 'Nenhum addon ativo possui catálogo com suporte a busca.';
     }
   } catch (e) {
-    if (seq === searchSeq) status.textContent = String(e);
+    if (seq === searchSeq) {
+      activeSearchQuery = '';
+      status.textContent = String(e);
+    }
   }
 }
 
@@ -3092,7 +5180,7 @@ function initDiscoverFromAddons(addons) {
   if (!discoverSelectedType || !types.includes(discoverSelectedType)) {
     discoverSelectedType = types[0] || null;
   }
-  syncDiscoverSelection();
+  if (activeTabName() === 'discover') syncDiscoverSelection();
 }
 
 function syncDiscoverSelection() {
@@ -3106,6 +5194,9 @@ function syncDiscoverSelection() {
 
   const types = [...new Set(discoverCatalogs.map((c) => c.type))];
   if (!types.length) {
+    ++discoverRequest;
+    discoverLoading = false;
+    discoverHasMore = false;
     typePillsEl.innerHTML = '';
     catSelectEl.innerHTML = '';
     genreSelectEl.classList.add('hidden');
@@ -3183,7 +5274,8 @@ function maybeInfiniteDiscover() {
 
 async function loadDiscoverPage(reset) {
   const activeCat = discoverCatalogs.find((c) => c.key === discoverSelectedKey);
-  if (!activeCat || discoverLoading) return;
+  if (!activeCat || (!reset && discoverLoading)) return;
+  const request = ++discoverRequest;
   discoverLoading = true;
 
   const gridEl = document.getElementById('discover-grid');
@@ -3207,6 +5299,7 @@ async function loadDiscoverPage(reset) {
       genre: discoverSelectedGenre,
       search: null,
     });
+    if (request !== discoverRequest) return;
     const added = [];
     for (const item of page) {
       const k = `${item.type}:${item.id}`;
@@ -3226,43 +5319,282 @@ async function loadDiscoverPage(reset) {
     loadBtn.classList.toggle('hidden', !discoverHasMore);
     statusEl.textContent = discoverItems.length ? `${discoverItems.length} item(ns)` : 'Nenhum item neste catálogo.';
   } catch (e) {
+    if (request !== discoverRequest) return;
     statusEl.textContent = String(e);
     discoverHasMore = false;
     loadBtn.classList.add('hidden');
   } finally {
-    discoverLoading = false;
-    loadBtn.disabled = false;
+    if (request === discoverRequest) {
+      discoverLoading = false;
+      loadBtn.disabled = false;
+    }
   }
 }
 
 document.getElementById('btn-discover-load-more').addEventListener('click', () => loadDiscoverPage(false));
 
 // --- LIBRARY (LibraryScreen.kt filters & layout toggle) ---
-document.getElementById('btn-library-layout').addEventListener('click', () => {
+let librarySubTab = 'saved';
+
+function setLibrarySubTab(nextTab) {
+  librarySubTab = nextTab === 'following' ? 'following' : 'saved';
+  document.querySelectorAll('[data-library-tab]').forEach((btn) => {
+    const active = btn.dataset.libraryTab === librarySubTab;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  const savedPanel = document.getElementById('library-panel-saved');
+  const followingPanel = document.getElementById('library-panel-following');
+  if (savedPanel) savedPanel.hidden = librarySubTab !== 'saved';
+  if (followingPanel) followingPanel.hidden = librarySubTab !== 'following';
+  if (librarySubTab === 'following') {
+    renderFollowingSection();
+  } else {
+    renderFilteredLibrary();
+  }
+}
+
+document.querySelectorAll('[data-library-tab]').forEach((btn) => {
+  btn.addEventListener('click', () => setLibrarySubTab(btn.dataset.libraryTab));
+});
+
+document.getElementById('btn-library-layout')?.addEventListener('click', () => {
   libraryListMode = !libraryListMode;
-  document.getElementById('library-grid').classList.toggle('list-layout', libraryListMode);
+  renderFilteredLibrary();
+  renderFollowingSection();
 });
 
 ['library-filter-q', 'library-filter-type', 'library-filter-watched', 'library-sort'].forEach((id) => {
-  document.getElementById(id).addEventListener('input', renderFilteredLibrary);
-  document.getElementById(id).addEventListener('change', renderFilteredLibrary);
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener('input', renderFilteredLibrary);
+  el.addEventListener('change', renderFilteredLibrary);
 });
 
-document.getElementById('btn-refresh-library').addEventListener('click', refreshLibrary);
+['following-filter-q', 'following-filter-role', 'following-sort'].forEach((id) => {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener('input', renderFollowingSection);
+  el.addEventListener('change', renderFollowingSection);
+});
+
+document.getElementById('btn-refresh-library')?.addEventListener('click', refreshLibrary);
+
+const libraryCollections = document.getElementById('library-collections');
+const libraryCollectionsList = document.getElementById('library-collections-list');
+const libraryCollectionsStatus = document.getElementById('library-collections-status');
+let collectionsRequest = 0;
+let collectionCatalogRequest = 0;
+
+libraryCollections?.addEventListener('toggle', () => {
+  if (libraryCollections.open) refreshAccountCollections();
+  else clearAccountCollections();
+});
+
+function clearAccountCollections() {
+  collectionsRequest++;
+  libraryCollectionsList?.replaceChildren();
+  if (libraryCollectionsStatus) libraryCollectionsStatus.textContent = '';
+}
+
+async function refreshAccountCollections() {
+  clearAccountCollections();
+  const request = collectionsRequest;
+  libraryCollectionsStatus.textContent = 'Carregando coleções…';
+  try {
+    const [collections, addons] = await Promise.all([
+      invoke('pull_account_collections'),
+      invoke('list_addons'),
+    ]);
+    if (request !== collectionsRequest) return;
+
+    const enabledAddons = addons.filter((addon) => addon.enabled);
+    for (const collection of collections) {
+      const section = document.createElement('section');
+      const heading = document.createElement('h3');
+      heading.textContent = collection.title || 'Coleção';
+      section.append(heading);
+      for (const folder of collection.folders || []) {
+        const row = document.createElement('div');
+        row.className = 'library-controls-row';
+        const label = document.createElement('span');
+        label.textContent = folder.title || 'Pasta';
+        row.append(label);
+        const sources = folder.sources?.length ? folder.sources : (folder.catalogSources || []);
+        for (const source of sources) {
+          if (source.provider && source.provider.toLowerCase() !== 'addon') continue;
+          const addon = enabledAddons.find((candidate) => candidate.manifest.id === source.addonId);
+          const catalog = addon?.manifest.catalogs?.find(
+            (candidate) => candidate.id === source.catalogId && candidate.type === source.type
+          );
+          if (!catalog) continue;
+
+          const genre = source.genre?.trim();
+          const button = document.createElement('button');
+          button.className = 'btn-ghost';
+          button.textContent = [catalog.name || catalog.id, genre].filter(
+            (part) => part && part.toLowerCase() !== 'none'
+          ).join(' · ');
+          button.addEventListener('click', async () => {
+            const catalogRequest = ++collectionCatalogRequest;
+            button.disabled = true;
+            libraryCollectionsStatus.textContent = 'Carregando catálogo…';
+            try {
+              const params = {
+                manifestUrl: addon.manifest_url,
+                mediaType: catalog.type,
+                catalogId: catalog.id,
+                genre: genre && genre.toLowerCase() !== 'none' ? genre : null,
+              };
+              const items = await invoke('load_catalog_page', params);
+              if (request !== collectionsRequest || catalogRequest !== collectionCatalogRequest ||
+                  !libraryCollections.open || activeTabName() !== 'library') return;
+              libraryCollectionsStatus.textContent = items.length ? '' : 'O catálogo não retornou títulos.';
+              if (items.length) openFullCatalog({
+                title: folder.title || catalog.name,
+                addon_name: addon.manifest.name,
+                manifest_url: params.manifestUrl,
+                media_type: params.mediaType,
+                catalog_id: params.catalogId,
+                genre: params.genre,
+                items,
+              });
+            } catch {
+              if (request === collectionsRequest && catalogRequest === collectionCatalogRequest) {
+                libraryCollectionsStatus.textContent = 'Não foi possível abrir o catálogo.';
+              }
+            } finally {
+              button.disabled = false;
+            }
+          });
+          row.append(button);
+        }
+        if (row.childElementCount === 1) {
+          const unavailable = document.createElement('span');
+          unavailable.className = 'muted';
+          unavailable.textContent = 'Sem catálogo de addon ativo para esta pasta.';
+          row.append(unavailable);
+        }
+        section.append(row);
+      }
+      libraryCollectionsList.append(section);
+    }
+    libraryCollectionsStatus.textContent = collections.length ? '' : 'Nenhuma coleção sincronizada neste perfil.';
+  } catch {
+    if (request === collectionsRequest) {
+      libraryCollectionsStatus.textContent = 'Não foi possível carregar as coleções deste perfil.';
+    }
+  }
+}
+
+function renderFollowingSection() {
+  const grid = document.getElementById('library-following-grid');
+  const heading = document.getElementById('library-following-heading');
+  const status = document.getElementById('library-status');
+  const followingChip = document.querySelector('[data-library-tab="following"]');
+  if (followingChip) {
+    followingChip.textContent = followedPeopleList.length ? `Seguindo (${followedPeopleList.length})` : 'Seguindo';
+  }
+  if (!grid) return;
+
+  const q = (document.getElementById('following-filter-q')?.value || '').trim().toLowerCase();
+  const roleF = document.getElementById('following-filter-role')?.value || 'all';
+  const sortF = document.getElementById('following-sort')?.value || 'recent';
+
+  let list = [...followedPeopleList];
+  if (q) {
+    list = list.filter((p) => (p.name || p.id || '').toLowerCase().includes(q) || (p.role || '').toLowerCase().includes(q));
+  }
+  if (roleF === 'actor') {
+    list = list.filter((p) => !p.role || /ator|atriz|acting|elenco/i.test(p.role));
+  } else if (roleF === 'crew') {
+    list = list.filter((p) => p.role && !/ator|atriz|acting|elenco/i.test(p.role));
+  }
+  if (sortF === 'name') {
+    list.sort((a, b) => (a.name || a.id || '').localeCompare(b.name || b.id || ''));
+  }
+
+  if (heading) heading.style.display = list.length ? '' : 'none';
+  if (librarySubTab === 'following' && status) {
+    status.textContent = `${list.length} pessoa(s) seguida(s)`;
+  }
+
+  const cardsHtml = list.map((p) => {
+    const displayName = p.name || (p.id ? `Ator #${p.id}` : 'Elenco');
+    const roleLabel = p.role || 'Elenco';
+    const keyAttr = esc(p.id || p.name);
+    return `
+      <div class="poster-card following-person-card" data-person-id="${esc(p.id)}" data-person-name="${esc(p.name)}" data-person-photo="${esc(p.photo)}" role="button" tabindex="0" title="${esc(displayName)}">
+        <div class="poster-img-wrap">
+          ${p.photo ? `<img class="following-person-img" src="${esc(p.photo)}" alt="${esc(displayName)}" loading="lazy" decoding="async" draggable="false" />` : `<div class="following-person-placeholder">${esc(displayName.charAt(0).toUpperCase())}</div>`}
+          <button class="following-unfollow-btn" data-unfollow-key="${keyAttr}" type="button" title="Deixar de seguir ${esc(displayName)}" aria-label="Deixar de seguir ${esc(displayName)}">×</button>
+        </div>
+        <div class="poster-name">${esc(displayName)}</div>
+        <div class="poster-sub">${esc(roleLabel)}</div>
+      </div>
+    `;
+  }).join('');
+
+  if (!cardsHtml) {
+    grid.className = '';
+    grid.innerHTML = '<div class="muted">Você ainda não segue ninguém. Abra um título, clique em um ator e toque em Seguir.</div>';
+  } else if (libraryListMode) {
+    grid.className = 'poster-grid following-poster-grid';
+    grid.innerHTML = cardsHtml;
+  } else {
+    grid.className = 'shelf-row';
+    grid.innerHTML = cardsHtml;
+    wireHorizontalShelfDrag(grid.parentElement);
+  }
+
+  grid.querySelectorAll('[data-unfollow-key]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const card = btn.closest('.following-person-card');
+      const name = card?.dataset.personName || 'Ator';
+      toggleFollowPerson({ id: card?.dataset.personId || '', name: card?.dataset.personName || '' });
+      showToast(`Deixou de seguir ${name}.`);
+      renderFollowingSection();
+    });
+  });
+
+  wirePosterInteractions(grid);
+  hydrateMissingFollowedPhotos();
+}
 
 async function refreshLibrary() {
-  document.getElementById('library-status').textContent = 'Sincronizando biblioteca…';
+  if (libraryCollections?.open) refreshAccountCollections();
+  const status = document.getElementById('library-status');
+  if (librarySubTab === 'saved' && status) {
+    status.textContent = 'Sincronizando biblioteca…';
+  }
   await refreshLibraryState();
   renderFilteredLibrary();
+}
+
+function libraryItemToCard(it) {
+  return renderPosterCard({
+    id: it.content_id || it.id || '',
+    type: it.content_type || it.type || 'movie',
+    name: it.name || 'Item',
+    poster: it.poster || '',
+    banner: it.background || it.poster || '',
+    logo: it.logo || '',
+    description: it.description || '',
+    release_info: it.release_info || '',
+    imdb_rating: it.imdb_rating || '',
+  });
 }
 
 function renderFilteredLibrary() {
   const status = document.getElementById('library-status');
   const grid = document.getElementById('library-grid');
-  const q = document.getElementById('library-filter-q').value.trim().toLowerCase();
-  const typeF = document.getElementById('library-filter-type').value;
-  const watchF = document.getElementById('library-filter-watched').value;
-  const sortF = document.getElementById('library-sort').value;
+  if (!grid) return;
+
+  const q = (document.getElementById('library-filter-q')?.value || '').trim().toLowerCase();
+  const typeF = document.getElementById('library-filter-type')?.value || 'all';
+  const watchF = document.getElementById('library-filter-watched')?.value || 'all';
+  const sortF = document.getElementById('library-sort')?.value || 'recent';
 
   let items = [...libraryRawItems];
   if (q) {
@@ -3283,24 +5615,46 @@ function renderFilteredLibrary() {
     items.sort((a, b) => (parseInt(b.release_info, 10) || 0) - (parseInt(a.release_info, 10) || 0));
   }
 
-  status.textContent = `${items.length} item(ns) na biblioteca`;
-  grid.classList.toggle('list-layout', libraryListMode);
-  grid.innerHTML = items.map((it) => renderPosterCard({
-    id: it.content_id || it.id || '',
-    type: it.content_type || it.type || 'movie',
-    name: it.name || 'Item',
-    poster: it.poster || '',
-    banner: it.background || it.poster || '',
-    logo: it.logo || '',
-    description: it.description || '',
-    release_info: it.release_info || '',
-    imdb_rating: it.imdb_rating || '',
-  })).join('') || '<div class="muted">Nenhum título encontrado na biblioteca.</div>';
+  if (librarySubTab === 'saved' && status) {
+    status.textContent = `${items.length} item(ns) na biblioteca`;
+  }
+
+  if (!items.length) {
+    grid.className = 'library-shelves';
+    grid.innerHTML = '<div class="muted">Nenhum título encontrado na biblioteca.</div>';
+    return;
+  }
+
+  const buckets = [
+    { key: 'movie', title: 'Movie', list: [] },
+    { key: 'series', title: 'Series', list: [] },
+    { key: 'other', title: 'Outros', list: [] },
+  ];
+  for (const it of items) {
+    const t = String(it.content_type || it.type || 'movie').toLowerCase();
+    if (t === 'movie') buckets[0].list.push(it);
+    else if (t === 'series' || t === 'tv' || t === 'show') buckets[1].list.push(it);
+    else buckets[2].list.push(it);
+  }
+
+  const containerClass = libraryListMode ? 'poster-grid' : 'shelf-row';
+  grid.className = 'library-shelves';
+  grid.innerHTML = buckets
+    .filter((b) => b.list.length > 0)
+    .map((b) => `
+      <section class="library-shelf-section">
+        <h3 class="library-shelf-title">${esc(b.title)}</h3>
+        <div class="${containerClass}">${b.list.map(libraryItemToCard).join('')}</div>
+      </section>
+    `).join('');
+
+  if (!libraryListMode) wireHorizontalShelfDrag(grid);
   wirePosterInteractions(grid);
 }
 
 // --- SETTINGS ---
 function selectSettingsSection(id) {
+  if (id === "connected") refreshConnectedAccounts();
   document.querySelectorAll('.settings-cat-btn').forEach((b) => {
     b.classList.toggle('active', b.dataset.settingsSec === id);
   });
@@ -3336,12 +5690,15 @@ document.getElementById('btn-switch-profile-screen').addEventListener('click', (
 });
 
 document.getElementById('btn-sign-out').addEventListener('click', async () => {
+  ++simklGeneration;
+  simklAccount = {};
   await invoke('sign_out');
   showView('view-auth');
 });
 
-function applySettingsToUi(s) {
+function applySettingsToUi(s, patch = null) {
   appSettings = s;
+  if (!patch || patch.connected || patch.seekr) applyConnectedPreferences(s);
   const theme = s.theme || 'white';
   document.body.dataset.theme = theme;
   if (theme === 'custom' && Array.isArray(s.custom_theme_colors)) {
@@ -3373,6 +5730,7 @@ function applySettingsToUi(s) {
   const topnavEl = document.getElementById('desktop-topnav');
   const sidebarEl = document.getElementById('desktop-sidebar');
   shellEl.classList.toggle('top-nav-mode', topNavMode);
+  topnavEl.dataset.mode = s.nav_mode || 'adaptive';
   topnavEl.classList.toggle('hidden', !topNavMode);
   sidebarEl.classList.toggle('hidden', topNavMode);
   sidebarEl.classList.toggle('nav-expanded', s.nav_mode === 'expanded');
@@ -3387,7 +5745,21 @@ function applySettingsToUi(s) {
   document.getElementById('set-show-size-badge').checked = s.show_file_size_badge !== false;
   document.getElementById('set-cw-style').value = s.cw_style || 'card';
   document.getElementById('set-detail-bg-mode').value = s.detail_bg_mode || 'cinematic';
+  document.getElementById('set-streams-bg-mode').value = s.streams_bg_mode || 'cover';
+  const dnsProv = document.getElementById('set-dns-provider');
+  const dnsCustom = document.getElementById('set-dns-custom');
+  const dnsCustomRow = document.getElementById('dns-custom-row');
+  if (dnsProv) dnsProv.value = s.dns_provider || 'cloudflare';
+  if (dnsCustom) dnsCustom.value = s.dns_custom || '';
+  if (dnsCustomRow) dnsCustomRow.hidden = (dnsProv?.value || 'cloudflare') !== 'custom';
 
+  if (!patch || patch.playback) applyPlaybackForm(s);
+  if (!patch || patch.services) applyServiceForm(s);
+  syncDiscord();
+  renderThemeSwatches(theme);
+}
+
+function applyPlaybackForm(s) {
   document.getElementById('set-external-player').checked = !!s.external_player_enabled;
   document.getElementById('set-pause-overlay').checked = s.pause_overlay_enabled !== false;
   document.getElementById('set-next-ep').checked = s.next_episode_enabled !== false;
@@ -3396,6 +5768,11 @@ function applySettingsToUi(s) {
   document.getElementById('set-pref-audio').value = s.preferred_audio_lang || 'por';
   document.getElementById('set-pref-sub').value = s.preferred_sub_lang || 'pt-br';
   document.getElementById('set-mpv-path').value = s.mpv_path || '';
+  document.querySelectorAll('[data-playback]').forEach(el => {
+    const value = s.playback[el.dataset.playback];
+    if (el.type === 'checkbox') el.checked = value;
+    else el.value = value;
+  });
 
   document.getElementById('set-skip-enabled').checked = s.skip_intro_enabled !== false;
   document.getElementById('set-autoskip-intro').checked = !!s.auto_skip_intro;
@@ -3410,17 +5787,31 @@ function applySettingsToUi(s) {
   document.getElementById('set-sub-bold').checked = !!subSt.bold;
   document.getElementById('set-sub-outline').checked = subSt.outlineEnabled !== false;
   document.getElementById('set-sub-shadow').checked = subSt.shadowEnabled !== false;
-
-  document.getElementById('set-tmdb-key').value = s.tmdb_api_key || '';
-  renderThemeSwatches(theme);
 }
 
-async function persistSettingsPatch(patch) {
-  const s = await invoke('load_settings');
-  Object.assign(s, patch);
-  await invoke('save_settings', { settings: s });
-  applySettingsToUi(s);
-  return s;
+function applyServiceForm(s) {
+  document.getElementById('set-tmdb-key').value = s.tmdb_api_key || '';
+  document.querySelectorAll('[data-service]').forEach(el => {
+    const value = s.services[el.dataset.service];
+    if (el.type === 'checkbox') el.checked = value;
+    else el.value = value;
+  });
+  document.querySelectorAll('[data-provider]').forEach(el => {
+    el.checked = s.services.providers.includes(el.dataset.provider);
+  });
+}
+
+let pendingSettingsSave = Promise.resolve();
+function persistSettingsPatch(patch) {
+  const saved = pendingSettingsSave.then(async () => {
+    const settings = await invoke('load_settings');
+    Object.assign(settings, patch);
+    await invoke('save_settings', { settings });
+    applySettingsToUi(settings, patch);
+    return settings;
+  });
+  pendingSettingsSave = saved.catch(() => {});
+  return saved;
 }
 
 document.getElementById('toggle-amoled').addEventListener('change', (e) => {
@@ -3430,9 +5821,10 @@ document.getElementById('toggle-amoled').addEventListener('change', (e) => {
 function renderThemeSwatches(currentTheme) {
   const wrap = document.getElementById('theme-swatches');
   wrap.innerHTML = THEMES.map((t) => `
-    <button class="swatch-btn ${t.id === currentTheme ? 'active' : ''}" data-theme-id="${t.id}">
-      <span class="swatch-dot" style="background:${t.color};"></span>
-      <span>${t.label}</span>
+    <button type="button" class="nv-row nv-theme-row ${t.id === currentTheme ? 'active' : ''}" data-theme-id="${t.id}">
+      <span class="nv-theme-dot" style="background:${t.color};"></span>
+      <span class="nv-copy"><span class="nv-title">${t.label}</span></span>
+      <span class="nv-theme-check">${t.id === currentTheme ? '✓' : ''}</span>
     </button>
   `).join('');
   wrap.querySelectorAll('[data-theme-id]').forEach((btn) => {
@@ -3462,6 +5854,7 @@ document.getElementById('btn-apply-custom-theme').addEventListener('click', () =
   ['set-show-size-badge', 'show_file_size_badge', 'checked'],
   ['set-cw-style', 'cw_style', 'value'],
   ['set-detail-bg-mode', 'detail_bg_mode', 'value'],
+  ['set-streams-bg-mode', 'streams_bg_mode', 'value'],
 ].forEach(([elId, key, prop]) => {
   document.getElementById(elId).addEventListener('change', async (e) => {
     await persistSettingsPatch({ [key]: e.target[prop] });
@@ -3480,6 +5873,8 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
     hold_to_speed_value: Number(document.getElementById('set-hold-speed-val').value) || 2.0,
     preferred_audio_lang: document.getElementById('set-pref-audio').value.trim(),
     preferred_sub_lang: document.getElementById('set-pref-sub').value.trim(),
+    playback: Object.fromEntries(Array.from(document.querySelectorAll('[data-playback]'), el =>
+      [el.dataset.playback, el.type === 'checkbox' ? el.checked : el.value])),
     mpv_path: document.getElementById('set-mpv-path').value.trim(),
     skip_intro_enabled: document.getElementById('set-skip-enabled').checked,
     auto_skip_intro: document.getElementById('set-autoskip-intro').checked,
@@ -3500,14 +5895,85 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
   showToast('Ajustes de reprodução salvos.');
 });
 
+function readServicesFromForm() {
+  const services = { ...(appSettings?.services || {}) };
+  document.querySelectorAll('[data-service]').forEach((el) => {
+    services[el.dataset.service] = el.type === 'checkbox' ? el.checked : el.value.trim();
+  });
+  services.providers = Array.from(document.querySelectorAll('[data-provider]:checked'), (el) => el.dataset.provider);
+  return services;
+}
+
+const DISCORD_SERVICE_KEYS = new Set([
+  'discord_enabled',
+  'discord_style',
+  'discord_scope',
+  'portrait',
+  'episode_image',
+  'episode_name',
+]);
+
+document.querySelectorAll('[data-service]').forEach((el) => {
+  if (!DISCORD_SERVICE_KEYS.has(el.dataset.service)) return;
+  el.addEventListener('change', async () => {
+    const services = readServicesFromForm();
+    try {
+      await persistSettingsPatch({ services });
+      sentPresence = 'null';
+      await syncDiscord(true);
+      if (el.dataset.service === 'discord_enabled') {
+        showToast(services.discord_enabled ? 'Discord Rich Presence ativado.' : 'Discord Rich Presence desativado.');
+      }
+    } catch {
+      showToast('Não foi possível salvar a opção do Discord.');
+    }
+  });
+});
+
 document.getElementById('btn-save-services').addEventListener('click', async () => {
-  await persistSettingsPatch({ tmdb_api_key: document.getElementById('set-tmdb-key').value.trim() });
+  const services = readServicesFromForm();
+  const key = document.getElementById('set-tmdb-key').value.trim();
+  const status = document.getElementById('services-status');
+  if ((services.tmdb_enabled && !key) || (services.mdblist_enabled && !services.mdblist_key)) {
+    status.textContent = 'Informe a chave de API do serviço ativado.';
+    return;
+  }
+  try {
+    await persistSettingsPatch({ tmdb_api_key: key, services });
+    sentPresence = 'null';
+    await syncDiscord(true);
+  } catch {
+    status.textContent = 'Não foi possível salvar os serviços.';
+    return;
+  }
+  heroRatings.clear();
+  renderHero();
   document.getElementById('services-status').textContent = 'Salvo!';
 });
 
-document.getElementById('btn-clear-cw-cache').addEventListener('click', async () => {
+document.getElementById('set-dns-provider')?.addEventListener('change', async (e) => {
+  const provider = e.target.value || 'cloudflare';
+  const customRow = document.getElementById('dns-custom-row');
+  if (customRow) customRow.hidden = provider !== 'custom';
+  await persistSettingsPatch({
+    dns_provider: provider,
+    dns_custom: document.getElementById('set-dns-custom')?.value.trim() || '',
+  });
+  showToast(`DNS alterado para ${provider.toUpperCase()}.`);
+});
+
+document.getElementById('btn-save-dns')?.addEventListener('click', async () => {
+  const status = document.getElementById('dns-status');
+  const provider = document.getElementById('set-dns-provider')?.value || 'custom';
+  const custom = document.getElementById('set-dns-custom')?.value.trim() || '';
+  await persistSettingsPatch({ dns_provider: provider, dns_custom: custom });
+  if (status) status.textContent = 'DNS salvo!';
+});
+
+document.getElementById('btn-clear-cw-cache')?.addEventListener('click', async () => {
   await invoke('clear_continue_watching_cache');
-  document.getElementById('cache-status').textContent = 'Cache limpo.';
+  const cs = document.getElementById('cache-status');
+  if (cs) cs.textContent = 'Cache limpo.';
   refreshContinueWatching();
 });
 
@@ -3546,46 +6012,39 @@ function renderAddonsList(list) {
       : ADDON_PUZZLE_SVG;
 
     return `
-      <div class="addon-card ${a.enabled ? '' : 'disabled'}">
-        <div class="addon-card-top">
-          <div class="addon-card-ident" title="${esc(a.manifest_url)}">
-            <div class="addon-icon-badge ${logoUrl ? '' : 'is-fallback'}">${iconHtml}</div>
-            <div class="addon-title-wrap">
-              <div class="addon-title-row">
-                <strong>${esc(m.name)}</strong>
-                <span class="addon-version">v${esc(m.version)}</span>
-              </div>
-            </div>
-          </div>
-          <label class="nuvio-switch" title="${a.enabled ? 'Desativar addon' : 'Ativar addon'}">
-            <input type="checkbox" data-toggle-addon="${esc(a.manifest_url)}" ${a.enabled ? 'checked' : ''} />
-            <span class="nuvio-switch-track"></span>
-          </label>
-        </div>
-
-        <div class="addon-actions-row">
-          <button class="addon-icon-btn" data-move-addon="${esc(a.manifest_url)}" data-delta="-1" title="Mover para cima" ${index === 0 ? 'disabled' : ''}>${SVG_UP}</button>
-          <button class="addon-icon-btn" data-move-addon="${esc(a.manifest_url)}" data-delta="1" title="Mover para baixo" ${index === list.length - 1 ? 'disabled' : ''}>${SVG_DOWN}</button>
-          <button class="addon-icon-btn primary" data-refresh-addon="${esc(a.manifest_url)}" title="Atualizar manifesto">${SVG_REFRESH}</button>
-          ${configurable ? `<button class="addon-icon-btn" data-config-addon="${esc(configUrl)}" title="Configurar addon">${SVG_CONFIG}</button>` : ''}
-          <button class="addon-icon-btn danger" data-del-addon="${esc(a.manifest_url)}" data-addon-name="${esc(m.name)}" title="Remover addon">${SVG_DELETE}</button>
-        </div>
-
-        <div class="addon-divider"></div>
-
-        <div class="addon-badges-row">
-          <span class="addon-info-badge ${a.enabled ? 'ok' : ''}">${a.enabled ? 'Ativo' : 'Desativado'}</span>
-          <span class="addon-info-badge">${(m.resources || []).length} recurso(s)</span>
-          <span class="addon-info-badge">${(m.catalogs || []).length} catálogo(s)</span>
-          ${configurable ? '<span class="addon-info-badge">Configurável</span>' : ''}
-          ${hints.p2p ? '<span class="addon-info-badge">P2P</span>' : ''}
-        </div>
-
-        ${m.description ? `<div class="addon-desc">${esc(m.description)}</div>` : ''}
-        <div class="addon-meta-summary">${esc(renderAddonSummary(m))}</div>
+      <div class="nv-row nv-addon-row ${a.enabled ? '' : 'is-disabled'}">
+        <span class="addon-icon-badge ${logoUrl ? '' : 'is-fallback'}" title="${esc(a.manifest_url)}">${iconHtml}</span>
+        <span class="nv-copy">
+          <span class="nv-addon-title">
+            <strong class="nv-addon-name">${esc(m.name)}</strong>
+            <span class="addon-version">v${esc(m.version)}</span>
+          </span>
+          ${m.description ? `<span class="nv-desc">${esc(m.description)}</span>` : ''}
+          <span class="addon-badges-row">
+            <span class="addon-info-badge ${a.enabled ? 'ok' : ''}">${a.enabled ? 'Ativo' : 'Desativado'}</span>
+            <span class="addon-info-badge">${(m.resources || []).length} recurso(s)</span>
+            <span class="addon-info-badge">${(m.catalogs || []).length} catálogo(s)</span>
+            ${configurable ? '<span class="addon-info-badge">Configurável</span>' : ''}
+            ${hints.p2p ? '<span class="addon-info-badge">P2P</span>' : ''}
+          </span>
+          <span class="nv-addon-footer">
+            <span class="addon-meta-summary">${esc(renderAddonSummary(m))}</span>
+            <span class="addon-actions-row">
+              <button class="addon-icon-btn" data-move-addon="${esc(a.manifest_url)}" data-delta="-1" title="Mover para cima" ${index === 0 ? 'disabled' : ''}>${SVG_UP}</button>
+              <button class="addon-icon-btn" data-move-addon="${esc(a.manifest_url)}" data-delta="1" title="Mover para baixo" ${index === list.length - 1 ? 'disabled' : ''}>${SVG_DOWN}</button>
+              <button class="addon-icon-btn primary" data-refresh-addon="${esc(a.manifest_url)}" title="Atualizar manifesto">${SVG_REFRESH}</button>
+              ${configurable ? `<button class="addon-icon-btn" data-config-addon="${esc(configUrl)}" title="Configurar addon">${SVG_CONFIG}</button>` : ''}
+              <button class="addon-icon-btn danger" data-del-addon="${esc(a.manifest_url)}" data-addon-name="${esc(m.name)}" title="Remover addon">${SVG_DELETE}</button>
+            </span>
+          </span>
+        </span>
+        <label class="nuvio-switch" title="${a.enabled ? 'Desativar addon' : 'Ativar addon'}">
+          <input type="checkbox" data-toggle-addon="${esc(a.manifest_url)}" ${a.enabled ? 'checked' : ''} />
+          <span class="nuvio-switch-track"></span>
+        </label>
       </div>
     `;
-  }).join('') || '<div class="settings-card"><div class="muted">Nenhum addon instalado.</div></div>';
+  }).join('') || '<div class="nv-note">Nenhum addon instalado.</div>';
 
   root.querySelectorAll('[data-toggle-addon]').forEach((input) => {
     input.addEventListener('change', async () => {
@@ -3672,24 +6131,22 @@ function renderPluginsUi(ps) {
 
   const reposEl = document.getElementById('plugin-repos-list');
   reposEl.innerHTML = (ps.repositories || []).map((r) => `
-    <div class="addon-card">
-      <div class="addon-card-top">
-        <div class="addon-title-wrap">
-          <div class="addon-title-row">
-            <strong>${esc(r.name)}</strong>
-            <span class="addon-version">v${esc(r.version)}</span>
-          </div>
-          <div class="addon-url-sub">${esc(r.manifest_url)}</div>
-        </div>
-        <div class="row-gap">
-          <button class="addon-icon-btn" data-refresh-repo="${esc(r.manifest_url)}" title="Atualizar repositório">${SVG_REFRESH}</button>
-          <button class="addon-icon-btn danger" data-del-repo="${esc(r.manifest_url)}" data-repo-name="${esc(r.name)}" title="Remover repositório">${SVG_DELETE}</button>
-        </div>
-      </div>
-      ${r.description ? `<div class="addon-desc">${esc(r.description)}</div>` : ''}
-      <div class="addon-meta-summary">${r.scraper_count} scraper(s)</div>
+    <div class="nv-row nv-addon-row">
+      <span class="nv-copy">
+        <span class="nv-addon-title">
+          <strong class="nv-addon-name">${esc(r.name)}</strong>
+          <span class="addon-version">v${esc(r.version)}</span>
+        </span>
+        <span class="nv-desc">${esc(r.manifest_url)}</span>
+        ${r.description ? `<span class="nv-desc">${esc(r.description)}</span>` : ''}
+        <span class="addon-meta-summary">${r.scraper_count} scraper(s)</span>
+      </span>
+      <span class="addon-actions-row">
+        <button class="addon-icon-btn" data-refresh-repo="${esc(r.manifest_url)}" title="Atualizar repositório">${SVG_REFRESH}</button>
+        <button class="addon-icon-btn danger" data-del-repo="${esc(r.manifest_url)}" data-repo-name="${esc(r.name)}" title="Remover repositório">${SVG_DELETE}</button>
+      </span>
     </div>
-  `).join('') || '<div class="muted">Nenhum repositório de plugins adicionado.</div>';
+  `).join('') || '<div class="nv-note">Nenhum repositório de plugins adicionado.</div>';
 
   reposEl.querySelectorAll('[data-refresh-repo]').forEach((b) => {
     b.onclick = async () => {
@@ -3712,26 +6169,24 @@ function renderPluginsUi(ps) {
 
   const scrapersEl = document.getElementById('plugin-scrapers-list');
   scrapersEl.innerHTML = (ps.scrapers || []).map((s) => `
-    <div class="addon-card ${s.enabled ? '' : 'disabled'}">
-      <div class="addon-card-top">
-        <div class="addon-title-wrap">
-          <div class="addon-title-row">
-            <strong>${esc(s.name)}</strong>
-            <span class="addon-version">v${esc(s.version)}</span>
-          </div>
-          <div class="addon-url-sub">${esc((s.supported_types || []).join(', ') || 'movie, tv')}</div>
-        </div>
-        <div class="row-gap">
-          <button class="btn-ghost" data-test-scraper="${esc(s.id)}" style="font-size:12px;">Testar</button>
-          <label class="nuvio-switch">
-            <input type="checkbox" data-toggle-scraper="${esc(s.id)}" ${s.enabled ? 'checked' : ''} />
-            <span class="nuvio-switch-track"></span>
-          </label>
-        </div>
-      </div>
-      ${s.description ? `<div class="addon-desc">${esc(s.description)}</div>` : ''}
+    <div class="nv-row nv-addon-row ${s.enabled ? '' : 'is-disabled'}">
+      <span class="nv-copy">
+        <span class="nv-addon-title">
+          <strong class="nv-addon-name">${esc(s.name)}</strong>
+          <span class="addon-version">v${esc(s.version)}</span>
+        </span>
+        <span class="nv-desc">${esc((s.supported_types || []).join(', ') || 'movie, tv')}</span>
+        ${s.description ? `<span class="nv-desc">${esc(s.description)}</span>` : ''}
+      </span>
+      <span class="nv-addon-side">
+        <button class="btn-ghost nv-mini-btn" data-test-scraper="${esc(s.id)}">Testar</button>
+        <label class="nuvio-switch">
+          <input type="checkbox" data-toggle-scraper="${esc(s.id)}" ${s.enabled ? 'checked' : ''} />
+          <span class="nuvio-switch-track"></span>
+        </label>
+      </span>
     </div>
-  `).join('') || '<div class="muted">Nenhum scraper instalado.</div>';
+  `).join('') || '<div class="nv-note">Nenhum scraper instalado.</div>';
 
   scrapersEl.querySelectorAll('[data-toggle-scraper]').forEach((input) => {
     input.onchange = async () => {
@@ -3779,7 +6234,7 @@ document.getElementById('btn-add-plugin-repo').addEventListener('click', async (
   }
 });
 
-document.getElementById('btn-run-plugin').addEventListener('click', async () => {
+document.getElementById('btn-run-plugin')?.addEventListener('click', async () => {
   const status = document.getElementById('plugin-status');
   const out = document.getElementById('plugin-results');
   status.textContent = 'Executando script…';
@@ -3793,11 +6248,14 @@ document.getElementById('btn-run-plugin').addEventListener('click', async () => 
     });
     status.textContent = `${streams.length} stream(s)`;
     out.innerHTML = streams.map((s) => `
-      <div class="addon-row">
-        <div><strong>${esc(s.name || 'Stream')}</strong> <span class="muted">${esc(s.title || s.url)}</span></div>
+      <div class="nv-row">
+        <span class="nv-copy">
+          <span class="nv-addon-name">${esc(s.name || 'Stream')}</span>
+          <span class="nv-desc">${esc(s.title || s.url)}</span>
+        </span>
         <button class="btn-accent" data-plugin-play="${esc(s.url)}" data-plugin-title="${esc(s.title || s.name || '')}">Assistir</button>
       </div>
-    `).join('');
+    `).join('') || '<div class="nv-note">Nenhum stream retornado.</div>';
     out.querySelectorAll('[data-plugin-play]').forEach((b) => {
       b.addEventListener('click', () => startInAppPlayback({
         url: b.dataset.pluginPlay,
@@ -3813,8 +6271,10 @@ document.getElementById('btn-run-plugin').addEventListener('click', async () => 
 });
 
 async function refreshDiagnostics() {
+  const box = document.getElementById('diag-box');
+  if (!box) return;
   const d = await invoke('get_diagnostics');
-  document.getElementById('diag-box').textContent =
+  box.textContent =
     `OS: ${d.os} (${d.arch})\nConfig: ${d.config_dir}\nCache: ${d.cache_dir}\nSQLite: ${d.sqlite_ok} | Redb: ${d.redb_ok}\nmpv: ${d.mpv_available}\nEngine (${d.engine_library_name}): found=${d.engine_found} api=${d.engine_api_version ?? '-'} libtorrent=${d.engine_backend_version ?? '-'}`;
 }
 

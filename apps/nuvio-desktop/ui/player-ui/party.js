@@ -280,12 +280,41 @@ const buildPartyStart = party => {
   if (note) {
     content.appendChild(partyElement("p", "party-note", note));
   } else {
-    const start = partyButtonElement(partyLabel("startAction"), "primary party-start-action", "start", () => send("partyStart", 0));
+    const start = partyButtonElement(partyLabel("startAction", "Criar sala"), "primary party-start-action", "start", () => send("partyStart", 0));
     if (party.busy) {
       start.disabled = true;
       start.prepend(partyElement("span", "party-spinner"));
     }
     content.appendChild(start);
+
+    const joinRow = partyElement("div", "party-join-row");
+    const joinInput = document.createElement("input");
+    joinInput.type = "text";
+    joinInput.maxLength = partyCodeLength;
+    joinInput.className = "party-join-input";
+    joinInput.dataset.partyFocus = "joinInput";
+    joinInput.placeholder = partyLabel("joinPlaceholder", "Código da sala");
+    joinInput.setAttribute("aria-label", partyLabel("joinPlaceholder", "Código da sala"));
+    joinInput.addEventListener("pointerdown", () => send("focusOverlay", 0));
+    joinInput.addEventListener("focus", () => send("focusOverlay", 0));
+    joinInput.addEventListener("click", event => {
+      event.stopPropagation();
+      send("focusOverlay", 0);
+    });
+    const submitJoin = () => {
+      const code = String(joinInput.value || "").trim().toUpperCase();
+      if (code.length < 4) return;
+      send(`partyJoinCode:${code}`, 0);
+    };
+    joinInput.addEventListener("keydown", event => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      submitJoin();
+    });
+    const joinBtn = partyButtonElement(partyLabel("joinAction", "Entrar"), "party-join-btn", "join", submitJoin);
+    joinRow.appendChild(joinInput);
+    joinRow.appendChild(joinBtn);
+    content.appendChild(joinRow);
   }
   content.appendChild(partyElement("p", "party-experimental", partyLabel("experimental")));
   return content;
@@ -770,6 +799,13 @@ partyTabParty.addEventListener("click", event => {
 partyTabChat.addEventListener("click", event => {
   event.stopPropagation();
   setPartyTab("chat");
+});
+
+partyChatInput.addEventListener("pointerdown", () => send("focusOverlay", 0));
+partyChatInput.addEventListener("focus", () => send("focusOverlay", 0));
+partyChatInput.addEventListener("click", event => {
+  event.stopPropagation();
+  send("focusOverlay", 0);
 });
 
 partyChatInput.addEventListener("input", () => {

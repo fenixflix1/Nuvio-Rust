@@ -1,11 +1,18 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod discord;
+mod metrics;
+mod party;
+mod services;
+mod connected;
 mod player;
+mod video_options;
 mod player_assets;
 #[cfg(target_os = "linux")]
 mod player_overlay_linux;
 mod plugins_repo;
 mod skip;
+mod simkl;
 
 use nuvio_core::integrations::addons::{
     AddonClient, AddonManifest, AddonStream, AddonSubtitle, MetaPreview,
@@ -32,16 +39,18 @@ use skip::{SkipChapter, SkipInterval, resolve_skip_intervals, submit_introdb_seg
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::{Arc, RwLock};
-use tauri::{AppHandle, Emitter, State, WebviewWindow};
+use std::sync::{Arc, Mutex, RwLock};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 struct AppState {
     paths: AppPaths,
     kv: KvStore,
     cache: CacheStore,
     addons_http: AddonClient,
+    addon_search: Mutex<(u64, Option<tokio::task::JoinHandle<()>>)>,
     supabase: Arc<RwLock<Option<SupabaseClient>>>,
     player: EmbeddedPlayer,
+    party: Arc<party::PartyRuntime>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +103,12 @@ fn default_cw_style() -> String {
 fn default_detail_bg_mode() -> String {
     "cinematic".to_string()
 }
+fn default_streams_bg_mode() -> String {
+    "cover".to_string()
+}
+fn default_dns_provider() -> String {
+    "cloudflare".to_string()
+}
 fn default_pref_audio() -> String {
     "por".to_string()
 }
@@ -132,6 +147,14 @@ fn default_subtitle_style() -> SubtitleStylePayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DesktopSettings {
     #[serde(default)]
+    playback: video_options::PlaybackOptions,
+    #[serde(default)]
+    services: services::Services,
+    #[serde(default)]
+    connected: connected::Preferences,
+    #[serde(default)]
+    seekr: connected::Preview,
+    #[serde(default)]
     tmdb_api_key: String,
     #[serde(default)]
     theme: String,
@@ -155,6 +178,12 @@ struct DesktopSettings {
     hover_preview_enabled: bool,
     #[serde(default = "default_detail_bg_mode")]
     detail_bg_mode: String,
+    #[serde(default = "default_streams_bg_mode")]
+    streams_bg_mode: String,
+    #[serde(default = "default_dns_provider")]
+    dns_provider: String,
+    #[serde(default)]
+    dns_custom: String,
     #[serde(default = "default_true_val")]
     stream_badges_top: bool,
     #[serde(default = "default_true_val")]
@@ -196,6 +225,10 @@ struct DesktopSettings {
 impl Default for DesktopSettings {
     fn default() -> Self {
         Self {
+            services: services::Services::default(),
+            connected: Default::default(),
+            seekr: Default::default(),
+            playback: video_options::PlaybackOptions::default(),
             tmdb_api_key: String::new(),
             theme: "white".to_string(),
             amoled_black: false,
@@ -208,6 +241,9 @@ impl Default for DesktopSettings {
             blur_unwatched_episodes: false,
             hover_preview_enabled: true,
             detail_bg_mode: default_detail_bg_mode(),
+            streams_bg_mode: default_streams_bg_mode(),
+            dns_provider: default_dns_provider(),
+            dns_custom: String::new(),
             stream_badges_top: true,
             show_addon_logo: true,
             show_file_size_badge: true,
@@ -617,13 +653,12 @@ async fn select_profile(
             }
 
             if !missing.is_empty() {
+                let shared_http = state.addons_http.clone();
                 let mut handles = Vec::with_capacity(missing.len());
                 for (idx, url, enabled) in missing {
+                    let http = shared_http.clone();
                     handles.push(tokio::spawn(async move {
-                        let fetched = match AddonClient::new() {
-                            Ok(http) => http.fetch_manifest(&url).await.ok(),
-                            Err(_) => None,
-                        };
+                        let fetched = http.fetch_manifest(&url).await.ok();
                         (idx, url, enabled, fetched)
                     }));
                 }
@@ -673,6 +708,28 @@ async fn pull_account_library(state: State<'_, AppState>) -> Result<Vec<Value>, 
     Ok(load_local_library_inner(&state.kv))
 }
 
+#[tauri::command]
+async fn pull_account_collections(state: State<'_, AppState>) -> Result<Vec<Value>, String> {
+    let Some(session) = load_session_inner(&state.kv) else {
+        return Ok(Vec::new());
+    };
+    let client = current_supabase(&state).ok_or("Servidor da conta indisponível.")?;
+    client.import_session(session);
+    let rows: Vec<Value> = client
+        .rpc(
+            "sync_pull_collections",
+            &serde_json::json!({ "p_profile_id": active_profile_idx(&state.kv) }),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    match rows.first().and_then(|row| row.get("collections_json")) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(collections)) => Ok(collections.clone()),
+        _ => Err("O servidor retornou coleções em um formato inválido.".into()),
+    }
+}
+
 /// Progressively fetches catalogs across enabled addons and emits `home:section`
 /// as soon as each catalog responds (matching `HomeRepository.kt` incremental publish).
 #[tauri::command]
@@ -705,13 +762,14 @@ async fn start_home_catalogs(
     }
 
     let total = requests.len();
+    let shared_http = state.addons_http.clone();
     tokio::spawn(async move {
         let mut handles = Vec::with_capacity(total);
         for (order, manifest, media_type, catalog_id, title) in requests {
             let app_clone = app.clone();
+            let http = shared_http.clone();
             handles.push(tokio::spawn(async move {
-                if let Ok(http) = AddonClient::new()
-                    && let Ok(items) = http
+                if let Ok(items) = http
                         .fetch_catalog(&manifest, &media_type, &catalog_id, None, Some(20))
                         .await
                     && !items.is_empty()
@@ -798,11 +856,13 @@ async fn start_continue_watching(
         .map(|a| a.manifest)
         .collect();
 
+    let shared_http = state.addons_http.clone();
     tokio::spawn(async move {
         let mut handles = Vec::with_capacity(total);
         for (order, e) in deduped.into_iter().enumerate() {
             let app_clone = app.clone();
             let addons_clone = meta_addons.clone();
+            let http = shared_http.clone();
             handles.push(tokio::spawn(async move {
                 let pct = if e.duration > 0 {
                     ((e.position as f64 / e.duration as f64) * 100.0)
@@ -836,15 +896,14 @@ async fn start_continue_watching(
                     last_watched: e.last_watched,
                 };
 
-                if let Ok(http) = AddonClient::new() {
-                    for manifest in addons_clone
-                        .iter()
-                        .filter(|m| m.supports_resource("meta", &e.content_type, &e.content_id))
+                for manifest in addons_clone
+                    .iter()
+                    .filter(|m| m.supports_resource("meta", &e.content_type, &e.content_id))
+                {
+                    if let Ok(meta) = http
+                        .fetch_meta(manifest, &e.content_type, &e.content_id)
+                        .await
                     {
-                        if let Ok(meta) = http
-                            .fetch_meta(manifest, &e.content_type, &e.content_id)
-                            .await
-                        {
                             if let Some(name) = meta.get("name").and_then(|v| v.as_str()) {
                                 card.title = name.to_string();
                             }
@@ -888,11 +947,10 @@ async fn start_continue_watching(
                                         .map(str::to_string);
                                 }
                             }
-                            card.artwork = ep_thumb
-                                .or_else(|| card.background.clone())
-                                .or_else(|| card.poster.clone());
-                            break;
-                        }
+                        card.artwork = ep_thumb
+                            .or_else(|| card.background.clone())
+                            .or_else(|| card.poster.clone());
+                        break;
                     }
                 }
 
@@ -958,65 +1016,72 @@ async fn start_addon_search(
     query: String,
     seq: u64,
 ) -> Result<ProgressiveStartAck, String> {
-    let q = query.trim().to_string();
-    if q.is_empty() {
+    const MAX_CONCURRENT_CATALOGS: usize = 4;
+    let mut active = state.addon_search.lock().map_err(|e| e.to_string())?;
+    if seq < active.0 {
         return Ok(ProgressiveStartAck { total: 0 });
     }
-    let encoded_search = format!("search={}", url_encode_segment(&q));
-    let addons = load_addons_inner(&state.kv)?;
+    active.0 = seq;
+    if let Some(previous) = active.1.take() {
+        previous.abort();
+    }
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(ProgressiveStartAck { total: 0 });
+    }
 
+    let extra = Arc::new(format!("search={}", url_encode_segment(query)));
+    let addons = load_addons_inner(&state.kv)?;
     let mut targets = Vec::new();
-    let mut order_idx = 0usize;
-    for addon in addons.into_iter().filter(|a| a.enabled) {
-        for cat in &addon.manifest.catalogs {
-            if !cat.supports_search() {
-                continue;
-            }
-            targets.push((order_idx, addon.clone(), cat.clone()));
-            order_idx += 1;
+    for addon in addons.into_iter().filter(|addon| addon.enabled) {
+        let addon = Arc::new(addon);
+        for catalog in addon.manifest.catalogs.iter().filter(|cat| cat.supports_search()) {
+            targets.push((addon.clone(), catalog.clone()));
         }
     }
 
     let total = targets.len();
-    tokio::spawn(async move {
-        let mut handles = Vec::with_capacity(total);
-        for (order, addon, cat) in targets {
-            let app_clone = app.clone();
-            let extra = encoded_search.clone();
-            handles.push(tokio::spawn(async move {
-                if let Ok(http) = AddonClient::new()
-                    && let Ok(items) = http
-                        .fetch_catalog(&addon.manifest, &cat.r#type, &cat.id, Some(&extra), None)
-                        .await
-                    && !items.is_empty()
-                {
-                    let type_label = match cat.r#type.as_str() {
-                        "movie" => "Filmes",
-                        "series" => "Séries",
-                        other => other,
-                    };
-                    let section = CatalogSection {
-                        order,
-                        key: format!(
-                            "{}:search:{}:{}",
-                            addon.manifest.id, cat.r#type, cat.id
-                        ),
-                        title: format!("{} - {}", cat.name, type_label),
-                        addon_name: addon.manifest.name,
-                        manifest_url: addon.manifest_url,
-                        media_type: cat.r#type,
-                        catalog_id: cat.id,
-                        items,
-                    };
-                    let _ = app_clone.emit("search:section", SearchSectionEvent { seq, section });
+    let http = state.addons_http.clone();
+    active.1 = Some(tokio::spawn(async move {
+        let mut pending = tokio::task::JoinSet::new();
+        for (order, (addon, cat)) in targets.into_iter().enumerate() {
+            if pending.len() >= MAX_CONCURRENT_CATALOGS {
+                pending.join_next().await;
+            }
+            let app = app.clone();
+            let http = http.clone();
+            let extra = extra.clone();
+            pending.spawn(async move {
+                let Ok(items) = http
+                    .fetch_catalog(&addon.manifest, &cat.r#type, &cat.id, Some(&extra), None)
+                    .await
+                else {
+                    return;
+                };
+                if items.is_empty() {
+                    return;
                 }
-            }));
+                let type_label = match cat.r#type.as_str() {
+                    "movie" => "Filmes",
+                    "series" => "Séries",
+                    other => other,
+                };
+                let section = CatalogSection {
+                    order,
+                    key: format!("{}:search:{}:{}", addon.manifest.id, cat.r#type, cat.id),
+                    title: format!("{} - {}", cat.name, type_label),
+                    addon_name: addon.manifest.name.clone(),
+                    manifest_url: addon.manifest_url.clone(),
+                    media_type: cat.r#type,
+                    catalog_id: cat.id,
+                    items,
+                };
+                let _ = app.emit("search:section", SearchSectionEvent { seq, section });
+            });
         }
-        for h in handles {
-            let _ = h.await;
-        }
+        while pending.join_next().await.is_some() {}
         let _ = app.emit("search:done", SearchDoneEvent { seq, total });
-    });
+    }));
 
     Ok(ProgressiveStartAck { total })
 }
@@ -1028,15 +1093,60 @@ async fn fetch_meta_details(
     id: String,
 ) -> Result<Value, String> {
     let addons = load_addons_inner(&state.kv)?;
+    let settings = load_settings_inner(&state.kv);
+    let meta_addons_sig: Vec<&str> = addons
+        .iter()
+        .filter(|a| a.enabled && a.manifest.supports_resource("meta", &media_type, &id))
+        .map(|a| a.manifest.id.as_str())
+        .collect();
+    let cache_key = format!(
+        "meta_details_v1:{media_type}:{id}:{}:{}:{}:{}:{}",
+        meta_addons_sig.join(","),
+        settings.services.tmdb_enabled,
+        settings.services.tmdb_collections,
+        settings.services.mdblist_enabled,
+        !settings.tmdb_api_key.trim().is_empty(),
+    );
+    if let Ok(Some(bytes)) = state.cache.get(&cache_key)
+        && let Ok(cached) = serde_json::from_slice::<Value>(&bytes)
+        && cached.as_object().is_some_and(|m| !m.is_empty())
+    {
+        return Ok(cached);
+    }
+
+    let mut details = serde_json::json!({});
     for addon in addons.into_iter().filter(|a| a.enabled) {
         if !addon.manifest.supports_resource("meta", &media_type, &id) {
             continue;
         }
-        if let Ok(meta) = state.addons_http.fetch_meta(&addon.manifest, &media_type, &id).await {
-            return Ok(meta);
+        if let Ok(meta) = state.addons_http.fetch_meta(&addon.manifest, &media_type, &id).await
+            && meta.is_object()
+        {
+            details = meta;
+            break;
         }
     }
-    Err("Nenhum addon retornou metadados para este título.".to_string())
+    settings.services.enrich(&mut details, &media_type, &id, &settings.tmdb_api_key).await;
+    if details.as_object().is_none_or(|m| m.is_empty()) {
+        return Err("Nenhum serviço retornou metadados para este título.".into());
+    }
+    if let Ok(bytes) = serde_json::to_vec(&details) {
+        let _ = state.cache.set(&cache_key, &bytes, Some(300));
+    }
+    Ok(details)
+}
+
+#[tauri::command]
+async fn runtime_metrics(app: AppHandle) -> metrics::RuntimeMetrics {
+    let player = {
+        let state = app.state::<AppState>();
+        state.player.metrics()
+    };
+    let mut result = tokio::task::spawn_blocking(|| metrics::collect(500))
+        .await
+        .unwrap_or_else(|_| metrics::collect(0));
+    result.player = player;
+    result
 }
 
 #[tauri::command]
@@ -1087,6 +1197,7 @@ fn load_settings(state: State<'_, AppState>) -> DesktopSettings {
 
 #[tauri::command]
 fn save_settings(state: State<'_, AppState>, settings: DesktopSettings) -> Result<(), String> {
+    nuvio_core::storage::dns::configure(&settings.dns_provider, &settings.dns_custom);
     let ns = state.kv.namespace("desktop_settings");
     let json = serde_json::to_string(&settings).map_err(|e| e.to_string())?;
     ns.put_string("config_json", Some(&json))
@@ -1202,7 +1313,7 @@ fn open_external_url(url: String) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     let spawn_res = Command::new("xdg-open").arg(trimmed).spawn();
     #[cfg(target_os = "windows")]
-    let spawn_res = Command::new("cmd").args(["/c", "start", "", trimmed]).spawn();
+    let spawn_res = Command::new("rundll32.exe").args(["url.dll,FileProtocolHandler", trimmed]).spawn();
     #[cfg(target_os = "macos")]
     let spawn_res = Command::new("open").arg(trimmed).spawn();
     spawn_res.map(|_| ()).map_err(|e| e.to_string())
@@ -1258,15 +1369,16 @@ async fn start_stream_search(
     let total = matching.len() + if will_run_scrapers { active_scrapers.len() } else { 0 };
     let addon_offset = matching.len();
 
+    let shared_http = state.addons_http.clone();
     tokio::spawn(async move {
         let mut handles = Vec::with_capacity(total);
         for (order, manifest) in matching.into_iter().enumerate() {
             let app_clone = app.clone();
             let mt = media_type.clone();
             let vid = id.clone();
+            let http = shared_http.clone();
             handles.push(tokio::spawn(async move {
-                if let Ok(http) = AddonClient::new()
-                    && let Ok(streams) = http.fetch_streams(&manifest, &mt, &vid).await
+                if let Ok(streams) = http.fetch_streams(&manifest, &mt, &vid).await
                     && !streams.is_empty()
                 {
                     let _ = app_clone.emit(
@@ -1379,6 +1491,7 @@ async fn start_stream_search(
         }
         let _ = app.emit("streams:active_scrapers", Vec::<String>::new());
         let _ = app.emit("streams:done", total);
+        player::trim_process_heap();
     });
 
     Ok(ProgressiveStartAck { total })
@@ -1477,6 +1590,153 @@ async fn test_plugin_scraper(
     let media_type = if scraper.supports_type("movie") { "movie" } else { "tv" };
     let (s, e) = if media_type == "tv" { (Some(1), Some(1)) } else { (None, None) };
     plugins_repo::run_scraper_for_stream(&scraper, "603", media_type, s, e, &settings.tmdb_api_key).await
+}
+
+// --- FOLLOWED PEOPLE (LOCAL PER-PROFILE SQLITE) ---
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FollowedPerson {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    photo: String,
+    #[serde(default)]
+    role: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ProfileInsightsResponse {
+    profile_index: i32,
+    library: Vec<Value>,
+    watched_items: Vec<SyncedWatchedItem>,
+    watch_progress: Vec<WatchProgressSyncEntry>,
+    followed_people: Vec<FollowedPerson>,
+}
+
+fn followed_people_key(kv: &KvStore) -> String {
+    format!("profile_{}", active_profile_idx(kv))
+}
+
+fn load_followed_people_inner(kv: &KvStore) -> Vec<FollowedPerson> {
+    let key = followed_people_key(kv);
+    kv.namespace("followed_people")
+        .get_string(&key)
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn parse_watched_key_item(raw: &str) -> Option<SyncedWatchedItem> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = trimmed.rsplitn(3, ':').collect();
+    if parts.len() == 3
+        && let (Ok(ep), Ok(sea)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>())
+    {
+        return Some(SyncedWatchedItem {
+            content_id: parts[2].to_string(),
+            content_type: "series".to_string(),
+            title: String::new(),
+            season: Some(sea),
+            episode: Some(ep),
+            watched_at: 0,
+        });
+    }
+    Some(SyncedWatchedItem {
+        content_id: trimmed.to_string(),
+        content_type: "movie".to_string(),
+        title: String::new(),
+        season: None,
+        episode: None,
+        watched_at: 0,
+    })
+}
+
+#[tauri::command]
+async fn profile_insights(state: State<'_, AppState>) -> Result<ProfileInsightsResponse, String> {
+    let pid = active_profile_idx(&state.kv);
+    let mut library = load_local_library_inner(&state.kv);
+    let mut watch_progress: Vec<WatchProgressSyncEntry> =
+        load_local_progress_inner(&state.kv).into_values().collect();
+    let local_watched = load_watched_keys_inner(&state.kv);
+    let mut watched_items: Vec<SyncedWatchedItem> = local_watched
+        .iter()
+        .filter_map(|k| parse_watched_key_item(k))
+        .collect();
+
+    if let (Some(client), Some(session)) =
+        (current_supabase(&state), load_session_inner(&state.kv))
+    {
+        client.import_session(session);
+        let (lib_res, wp_res, wk_p1) = tokio::join!(
+            client.pull_library(pid, 500, 0),
+            client.pull_watch_progress(pid, 500),
+            client.pull_watched_items(pid, 1, 500),
+        );
+        if let Ok(items) = lib_res {
+            let _ = save_local_library_inner(&state.kv, &items);
+            library = items;
+        }
+        if let Ok(entries) = wp_res {
+            let map: HashMap<String, WatchProgressSyncEntry> = entries
+                .iter()
+                .map(|e| (e.progress_key.clone(), e.clone()))
+                .collect();
+            let _ = save_local_progress_inner(&state.kv, &map);
+            watch_progress = entries;
+        }
+        if let Ok(mut items) = wk_p1 {
+            let mut page = 2;
+            let mut last_len = items.len();
+            while last_len == 500 && page <= 10 {
+                let Ok(next_page) = client.pull_watched_items(pid, page, 500).await else {
+                    break;
+                };
+                last_len = next_page.len();
+                items.extend(next_page);
+                page += 1;
+            }
+            let mut key_set: HashSet<String> = local_watched.into_iter().collect();
+            for it in &items {
+                key_set.insert(watched_key(&it.content_id, it.season, it.episode));
+            }
+            let merged_keys: Vec<String> = key_set.into_iter().collect();
+            let _ = save_watched_keys_inner(&state.kv, &merged_keys);
+            watched_items = items;
+        }
+    }
+
+    Ok(ProfileInsightsResponse {
+        profile_index: pid,
+        library,
+        watched_items,
+        watch_progress,
+        followed_people: load_followed_people_inner(&state.kv),
+    })
+}
+
+#[tauri::command]
+fn list_followed_people(state: State<'_, AppState>) -> Vec<FollowedPerson> {
+    load_followed_people_inner(&state.kv)
+}
+
+#[tauri::command]
+fn save_followed_people(
+    state: State<'_, AppState>,
+    people: Vec<FollowedPerson>,
+) -> Result<(), String> {
+    let key = followed_people_key(&state.kv);
+    let json = serde_json::to_string(&people).map_err(|e| e.to_string())?;
+    state
+        .kv
+        .namespace("followed_people")
+        .put_string(&key, Some(&json))
+        .map_err(|e| e.to_string())
 }
 
 // --- LIBRARY, WATCHED & WATCH PROGRESS SYNC ---
@@ -1695,14 +1955,16 @@ async fn player_play(
     h: u32,
     start_secs: Option<f64>,
     initial_controls_json: Option<String>,
+    anime: Option<bool>,
 ) -> Result<String, String> {
     let clean_url = url.trim().to_string();
     if clean_url.is_empty() {
         return Err("Empty stream URL.".to_string());
     }
     let settings = load_settings_inner(&state.kv);
+    let options = settings.playback.prepare(anime.unwrap_or(false), &state.paths.cache_dir)?;
     if settings.external_player_enabled {
-        return launch_mpv_external(&state, &clean_url, headers);
+        return launch_mpv_external(&state, &clean_url, headers, &options);
     }
 
     let scale = window.scale_factor().unwrap_or(1.0);
@@ -1724,6 +1986,7 @@ async fn player_play(
         start_secs,
         controls_url,
         initial_controls_json,
+        &options,
     );
     match res {
         Ok(has_overlay) => {
@@ -1737,7 +2000,7 @@ async fn player_play(
         Err(embed_err) => {
             tracing::error!("Embedded libmpv unavailable ({embed_err}); falling back to external mpv");
             eprintln!("Embedded libmpv unavailable ({embed_err}); falling back to external mpv");
-            launch_mpv_external(&state, &clean_url, headers)
+            launch_mpv_external(&state, &clean_url, headers, &options)
         }
     }
 }
@@ -1850,7 +2113,7 @@ async fn player_fetch_addon_subtitles(
     stream_url: Option<String>,
 ) -> Result<Vec<AddonSubtitle>, String> {
     let addons = load_addons_inner(&state.kv)?;
-    let http = AddonClient::new().map_err(|e| e.to_string())?;
+    let http = state.addons_http.clone();
     let hash_info = match stream_url.as_deref() {
         Some(url) => http.compute_opensubtitles_hash(url).await,
         None => None,
@@ -1888,9 +2151,13 @@ async fn player_fetch_addon_subtitles(
 }
 
 #[tauri::command]
-async fn player_load_subtitle_cues(url: String) -> Result<Vec<SubtitleCueItem>, String> {
-    let http = AddonClient::new().map_err(|e| e.to_string())?;
-    let text = http.fetch_text(&url).await.map_err(|e| e.to_string())?;
+fn player_set_reference_track(state: State<'_, AppState>, sid: Option<i64>) -> Result<(), String> {
+    state.player.set_reference_track(sid)
+}
+
+#[tauri::command]
+async fn player_load_subtitle_cues(state: State<'_, AppState>, url: String) -> Result<Vec<SubtitleCueItem>, String> {
+    let text = state.addons_http.fetch_text(&url).await.map_err(|e| e.to_string())?;
     Ok(parse_subtitle_cues(&text))
 }
 
@@ -1967,18 +2234,25 @@ fn launch_mpv_external(
     state: &AppState,
     clean_url: &str,
     headers: Option<HashMap<String, String>>,
+    options: &video_options::VideoOptions,
 ) -> Result<String, String> {
     let settings = load_settings_inner(&state.kv);
     let mpv_bin = resolve_mpv_binary(&settings.mpv_path);
     let mut cmd = Command::new(&mpv_bin);
     cmd.arg("--force-window=yes");
+    for (name, value) in &options.options {
+        cmd.arg(format!("--{name}={value}"));
+    }
+    if let Some(path) = &options.config {
+        cmd.arg(format!("--include={}", path.display()));
+    }
     if let Some(hdrs) = headers
         && !hdrs.is_empty()
     {
         let fields: Vec<String> = hdrs.into_iter().map(|(k, v)| format!("{k}: {v}")).collect();
         cmd.arg(format!("--http-header-fields={}", fields.join(",")));
     }
-    cmd.arg(clean_url);
+    cmd.arg("--").arg(clean_url);
     cmd.spawn()
         .map(|child| format!("external:{mpv_bin}:{}", child.id()))
         .map_err(|e| format!("Falha ao abrir '{mpv_bin}': {e}"))
@@ -1988,13 +2262,16 @@ fn launch_mpv_external(
 fn launch_mpv(
     state: State<'_, AppState>,
     url: String,
+    anime: Option<bool>,
     headers: Option<HashMap<String, String>>,
 ) -> Result<String, String> {
     let clean_url = url.trim();
     if clean_url.is_empty() {
         return Err("Empty stream URL.".to_string());
     }
-    launch_mpv_external(&state, clean_url, headers)
+    let settings = load_settings_inner(&state.kv);
+    let options = settings.playback.prepare(anime.unwrap_or(false), &state.paths.cache_dir)?;
+    launch_mpv_external(&state, clean_url, headers, &options)
 }
 
 async fn complete_auth_session(
@@ -2324,22 +2601,30 @@ fn main() {
 
     let paths = AppPaths::resolve().expect("Failed to resolve platform app paths");
     let kv = KvStore::open(paths.db_path()).expect("Failed to open SQLite KV store");
+    let startup_settings = load_settings_inner(&kv);
+    nuvio_core::storage::dns::configure(&startup_settings.dns_provider, &startup_settings.dns_custom);
     let cache = CacheStore::open(paths.cache_db_path()).expect("Failed to open Redb cache");
     let addons_http = AddonClient::new().expect("Failed to initialize HTTP client");
+    // Keeps an hour of memory samples so a slow climb can be told from steady state.
+    metrics::spawn_monitor();
 
     let state = AppState {
         paths,
         kv,
         cache,
         addons_http,
+        addon_search: Mutex::default(),
         supabase: Arc::new(RwLock::new(None)),
         player: EmbeddedPlayer::new(),
+        party: Arc::new(party::PartyRuntime::new()),
     };
 
     tauri::Builder::default()
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             get_auth_status,
+            simkl::simkl_status,
+            simkl::simkl_action,
             sign_in_email,
             sign_up_email,
             continue_as_guest,
@@ -2349,11 +2634,32 @@ fn main() {
             configure_server,
             select_profile,
             pull_account_library,
+            pull_account_collections,
             start_continue_watching,
             start_home_catalogs,
             load_catalog_page,
             start_addon_search,
             fetch_meta_details,
+            discord::discord_presence,
+            discord::discord_probe,
+            runtime_metrics,
+            party::party_create,
+            party::party_join,
+            party::party_preview,
+            party::party_leave,
+            party::party_end,
+            party::party_status,
+            party::party_set_host_only,
+            party::party_report_playback,
+            party::party_set_status,
+            party::party_send_message,
+            party::party_retry_message,
+            party::party_set_chat_open,
+            party::party_remove_member,
+            services::tmdb_season_episodes,
+            services::person_details,
+            services::resolve_people_photos,
+            services::hero_ratings,
             get_diagnostics,
             load_settings,
             save_settings,
@@ -2364,6 +2670,15 @@ fn main() {
             toggle_addon,
             refresh_addon,
             open_external_url,
+            connected::connected_accounts,
+            connected::connected_disconnect,
+            connected::connected_use_key,
+            connected::connected_start,
+            connected::connected_poll,
+            connected::connected_files,
+            connected::connected_play,
+            connected::connected_resolve,
+            connected::seekr_track,
             start_stream_search,
             run_js_plugin,
             list_plugins_state,
@@ -2373,6 +2688,9 @@ fn main() {
             toggle_plugin_scraper,
             set_plugins_enabled,
             test_plugin_scraper,
+            list_followed_people,
+            save_followed_people,
+            profile_insights,
             toggle_library_item,
             list_watched_keys,
             toggle_watched_item,
@@ -2398,6 +2716,7 @@ fn main() {
             player_apply_subtitle_style,
             player_fetch_addon_subtitles,
             player_load_subtitle_cues,
+            player_set_reference_track,
             player_resolve_skip_intervals,
             player_submit_intro,
             player_stop,
@@ -2406,4 +2725,24 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Nuvio Desktop Tauri application");
+}
+
+#[cfg(test)]
+mod insights_tests {
+    use super::parse_watched_key_item;
+
+    #[test]
+    fn parses_movie_and_series_watched_keys() {
+        let ep = parse_watched_key_item("tt6741278:4:3").expect("episode parsed");
+        assert_eq!(ep.content_id, "tt6741278");
+        assert_eq!(ep.content_type, "series");
+        assert_eq!(ep.season, Some(4));
+        assert_eq!(ep.episode, Some(3));
+
+        let mv = parse_watched_key_item("tt4154796").expect("movie parsed");
+        assert_eq!(mv.content_id, "tt4154796");
+        assert_eq!(mv.content_type, "movie");
+        assert_eq!(mv.season, None);
+        assert_eq!(mv.episode, None);
+    }
 }

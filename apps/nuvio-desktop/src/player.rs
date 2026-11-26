@@ -48,6 +48,7 @@ pub struct OverlayTrack {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MediaTrack {
+    pub external: bool,
     pub id: i64,
     pub track_type: String,
     pub title: String,
@@ -82,6 +83,9 @@ pub struct PlayerStatePayload {
     pub speed: f64,
     pub audio_tracks: Vec<MediaTrack>,
     pub subtitle_tracks: Vec<MediaTrack>,
+    pub reference_id: i64,
+    pub reference_text: String,
+    pub reference_start_secs: f64,
     pub chapters: Vec<SkipChapter>,
     pub media_info: PlayerMediaInfo,
 }
@@ -90,6 +94,20 @@ pub struct PlayerStatePayload {
 pub struct PlayerUiEventPayload {
     pub event_type: String,
     pub value: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayerMetrics {
+    pub hwdec_current: String,
+    pub video_codec: String,
+    pub pixel_format: String,
+    pub audio_codec: String,
+    pub cache_secs: f64,
+    pub width: i64,
+    pub height: i64,
+    pub fps: f64,
+    pub dropped_frames: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +127,7 @@ pub struct SubtitleStylePayload {
 }
 
 type MpvCreateFn = unsafe extern "C" fn() -> *mut c_void;
+type MpvLoadConfigFn = unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int;
 type MpvInitializeFn = unsafe extern "C" fn(*mut c_void) -> c_int;
 type MpvSetOptionStringFn =
     unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> c_int;
@@ -128,6 +147,7 @@ struct MpvApi {
     _lib: Arc<Library>,
     create: MpvCreateFn,
     initialize: MpvInitializeFn,
+    load_config: MpvLoadConfigFn,
     set_option_string: MpvSetOptionStringFn,
     command: MpvCommandFn,
     command_async: MpvCommandAsyncFn,
@@ -182,6 +202,9 @@ impl MpvApi {
                     return Ok(Self {
                         create: *create,
                         initialize: *initialize,
+                        load_config: *lib
+                            .get::<MpvLoadConfigFn>(b"mpv_load_config_file\0")
+                            .map_err(|e| e.to_string())?,
                         set_option_string: *set_option_string,
                         command: *command,
                         command_async: *command_async,
@@ -249,8 +272,9 @@ mod platform_host {
                 let x11 = Library::new("libX11.so.6").map_err(|e| e.to_string())?;
                 let open_display: Symbol<XOpenDisplayFn> =
                     x11.get(b"XOpenDisplay\0").map_err(|e| e.to_string())?;
-                let create_simple: Symbol<XCreateSimpleWindowFn> =
-                    x11.get(b"XCreateSimpleWindow\0").map_err(|e| e.to_string())?;
+                let create_simple: Symbol<XCreateSimpleWindowFn> = x11
+                    .get(b"XCreateSimpleWindow\0")
+                    .map_err(|e| e.to_string())?;
                 let map_win: Symbol<XMapWindowFn> =
                     x11.get(b"XMapWindow\0").map_err(|e| e.to_string())?;
                 let unmap_win: Symbol<XUnmapWindowFn> =
@@ -382,7 +406,8 @@ mod platform_host {
         isize,
         *mut c_void,
     ) -> isize;
-    type MoveWindowFn = unsafe extern "system" fn(isize, c_int, c_int, c_int, c_int, c_int) -> c_int;
+    type MoveWindowFn =
+        unsafe extern "system" fn(isize, c_int, c_int, c_int, c_int, c_int) -> c_int;
     type DestroyWindowFn = unsafe extern "system" fn(isize) -> c_int;
 
     pub struct ChildSurface {
@@ -398,8 +423,9 @@ mod platform_host {
         pub fn create(parent_hwnd: isize, x: i32, y: i32, w: u32, h: u32) -> Result<Self, String> {
             unsafe {
                 let user32 = Library::new("user32.dll").map_err(|e| e.to_string())?;
-                let create_win: Symbol<CreateWindowExWFn> =
-                    user32.get(b"CreateWindowExW\0").map_err(|e| e.to_string())?;
+                let create_win: Symbol<CreateWindowExWFn> = user32
+                    .get(b"CreateWindowExW\0")
+                    .map_err(|e| e.to_string())?;
                 let move_window: Symbol<MoveWindowFn> =
                     user32.get(b"MoveWindow\0").map_err(|e| e.to_string())?;
                 let destroy_window: Symbol<DestroyWindowFn> =
@@ -443,14 +469,7 @@ mod platform_host {
 
         pub fn set_bounds(&self, x: i32, y: i32, w: u32, h: u32) {
             unsafe {
-                (self.move_window)(
-                    self.hwnd,
-                    x,
-                    y,
-                    w.max(16) as c_int,
-                    h.max(16) as c_int,
-                    1,
-                );
+                (self.move_window)(self.hwnd, x, y, w.max(16) as c_int, h.max(16) as c_int, 1);
             }
         }
     }
@@ -494,12 +513,33 @@ struct ActiveSession {
     overlay_handle: Option<LinuxOverlayHandle>,
     #[cfg(target_os = "windows")]
     win_overlay: Option<WebviewWindow>,
+    event_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Returns unused glibc heap pages back to the kernel after heavy video/JS teardown.
+pub fn trim_process_heap() {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        static TRIM_FN: std::sync::OnceLock<Option<unsafe extern "C" fn(usize) -> c_int>> =
+            std::sync::OnceLock::new();
+        let fn_opt = TRIM_FN.get_or_init(|| {
+            let lib = Box::leak(Box::new(Library::new("libc.so.6").ok()?));
+            let sym = lib
+                .get::<unsafe extern "C" fn(usize) -> c_int>(b"malloc_trim\0")
+                .ok()?;
+            Some(*sym)
+        });
+        if let Some(trim) = fn_opt {
+            trim(0);
+        }
+    }
 }
 
 unsafe impl Send for ActiveSession {}
 
 pub struct EmbeddedPlayer {
     session: Arc<Mutex<Option<ActiveSession>>>,
+    party_locked: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -514,7 +554,12 @@ impl EmbeddedPlayer {
     pub fn new() -> Self {
         Self {
             session: Arc::new(Mutex::new(None)),
+            party_locked: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn set_party_locked(&self, locked: bool) {
+        self.party_locked.store(locked, Ordering::Relaxed);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -528,6 +573,7 @@ impl EmbeddedPlayer {
         start_secs: Option<f64>,
         controls_url: String,
         initial_controls_json: Option<String>,
+        options: &crate::video_options::VideoOptions,
     ) -> Result<bool, String> {
         self.stop();
 
@@ -556,7 +602,7 @@ impl EmbeddedPlayer {
         let parent_id = surface.parent_id();
         let api = MpvApi::load()?;
 
-        let handle = create_and_init_mpv(&api, &wid, headers.as_ref(), start_secs)?;
+        let handle = create_and_init_mpv(&api, &wid, headers.as_ref(), start_secs, options)?;
         mpv_cmd(&api, handle, &["loadfile", url, "replace"])?;
 
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -572,6 +618,7 @@ impl EmbeddedPlayer {
             let handle_addr = handle as usize;
             let ended_cb = Arc::clone(&ended_flag);
             let shared_cb = Arc::clone(&overlay_shared);
+            let party_locked_cb = Arc::clone(&self.party_locked);
             LinuxOverlayHandle::attach(
                 (host_id, parent_id),
                 (controls_url.clone(), initial_controls_json.clone()),
@@ -580,7 +627,19 @@ impl EmbeddedPlayer {
                 api.command,
                 Arc::clone(&overlay_shared),
                 Box::new(move |ev_type, val| {
-                    if shared_cb.mpv_alive.load(Ordering::Relaxed) {
+                    let blocked = party_locked_cb.load(Ordering::Relaxed)
+                        && matches!(
+                            ev_type,
+                            "setPlaybackState"
+                                | "setPlaybackStateQuiet"
+                                | "toggle"
+                                | "keyboardToggle"
+                                | "scrubFinish"
+                                | "seekBack"
+                                | "seekForward"
+                                | "setPlaybackSpeed"
+                        );
+                    if !blocked && shared_cb.mpv_alive.load(Ordering::Relaxed) {
                         handle_low_latency_mpv_action(
                             &api_cb,
                             handle_addr as *mut c_void,
@@ -642,11 +701,12 @@ impl EmbeddedPlayer {
             overlay_handle,
             #[cfg(target_os = "windows")]
             win_overlay,
+            event_thread: None,
         });
 
         let api_evt = api.clone();
         let handle_addr_evt = handle as usize;
-        std::thread::spawn(move || {
+        let evt_jh = std::thread::spawn(move || {
             let mut last_tick = std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_millis(250))
                 .unwrap_or_else(std::time::Instant::now);
@@ -702,8 +762,7 @@ impl EmbeddedPlayer {
                     };
                     let ff = sess.first_frame_shown.load(Ordering::Relaxed);
                     let ended = sess.ended_flag.load(Ordering::Relaxed);
-                    let (payload, update_js) =
-                        read_player_state(&sess.api, sess.handle, ff, ended);
+                    let (payload, update_js) = read_player_state(&sess.api, sess.handle, ff, ended);
 
                     #[cfg(target_os = "linux")]
                     {
@@ -727,6 +786,9 @@ impl EmbeddedPlayer {
                 }
             }
         });
+        if let Some(ref mut sess) = *self.session.lock().expect("player mutex") {
+            sess.event_thread = Some(evt_jh);
+        }
 
         Ok(has_overlay)
     }
@@ -804,7 +866,7 @@ impl EmbeddedPlayer {
         let guard = self.session.lock().expect("player mutex");
         let sess = guard.as_ref().ok_or("No active player")?;
         let target = secs.max(0.0).to_string();
-        mpv_cmd(&sess.api, sess.handle, &["seek", &target, "absolute"])
+        mpv_cmd(&sess.api, sess.handle, &["seek", &target, "absolute+exact"])
     }
 
     pub fn set_volume(&self, vol: f64) -> Result<(), String> {
@@ -837,6 +899,17 @@ impl EmbeddedPlayer {
         let guard = self.session.lock().expect("player mutex");
         let sess = guard.as_ref().ok_or("No active player")?;
         mpv_set_prop(&sess.api, sess.handle, "sid", sid)
+    }
+
+    pub fn set_reference_track(&self, sid: Option<i64>) -> Result<(), String> {
+        let guard = self.session.lock().expect("player mutex");
+        let sess = guard.as_ref().ok_or("No active player")?;
+        if sid.is_some() {
+            mpv_set_prop(&sess.api, sess.handle, "secondary-sub-visibility", "no")?;
+            mpv_set_prop(&sess.api, sess.handle, "secondary-sub-delay", "0")?;
+        }
+        let value = sid.map(|id| id.to_string()).unwrap_or_else(|| "no".into());
+        mpv_set_prop(&sess.api, sess.handle, "secondary-sid", &value)
     }
 
     pub fn add_subtitle_url(&self, url: &str) -> Result<(), String> {
@@ -881,7 +954,10 @@ impl EmbeddedPlayer {
         let _ = mpv_set_prop(a, h, "sub-color", &style.text_color);
         let _ = mpv_set_prop(a, h, "sub-border-color", &style.outline_color);
         let _ = mpv_set_prop(a, h, "sub-back-color", &style.background_color);
-        let transparent_bg = style.background_color.to_ascii_lowercase().starts_with("#00");
+        let transparent_bg = style
+            .background_color
+            .to_ascii_lowercase()
+            .starts_with("#00");
         let border_style = if transparent_bg {
             "outline-and-shadow"
         } else {
@@ -915,6 +991,24 @@ impl EmbeddedPlayer {
         Ok(())
     }
 
+    /// Runtime properties of the active mpv session, for the performance diagnostics.
+    pub fn metrics(&self) -> Option<PlayerMetrics> {
+        let guard = self.session.lock().ok()?;
+        let sess = guard.as_ref()?;
+        let (api, handle) = (&sess.api, sess.handle);
+        Some(PlayerMetrics {
+            hwdec_current: get_prop_string(api, handle, "hwdec-current"),
+            video_codec: get_prop_string(api, handle, "video-codec"),
+            pixel_format: get_prop_string(api, handle, "video-format"),
+            audio_codec: get_prop_string(api, handle, "audio-codec-name"),
+            cache_secs: get_prop_double(api, handle, "demuxer-cache-time"),
+            width: get_prop_i64(api, handle, "width"),
+            height: get_prop_i64(api, handle, "height"),
+            fps: get_prop_double(api, handle, "estimated-vf-fps"),
+            dropped_frames: get_prop_i64(api, handle, "vo-drop-frame-count"),
+        })
+    }
+
     pub fn stop(&self) {
         let taken = self.session.lock().expect("player mutex").take();
         if let Some(mut sess) = taken {
@@ -928,6 +1022,11 @@ impl EmbeddedPlayer {
                 }
                 unsafe {
                     (sess.api.wakeup)(sess.handle);
+                }
+                if let Some(jh) = sess.event_thread.take() {
+                    let _ = jh.join();
+                }
+                unsafe {
                     (sess.api.terminate_destroy)(sess.handle);
                 }
                 schedule_x11_child_cleanup(dpy, xid);
@@ -941,10 +1040,16 @@ impl EmbeddedPlayer {
                 }
                 unsafe {
                     (sess.api.wakeup)(sess.handle);
+                }
+                if let Some(jh) = sess.event_thread.take() {
+                    let _ = jh.join();
+                }
+                unsafe {
                     (sess.api.terminate_destroy)(sess.handle);
                 }
                 drop(sess.surface);
             }
+            trim_process_heap();
         }
     }
 }
@@ -979,7 +1084,7 @@ fn handle_low_latency_mpv_action(
         }
         "scrubFinish" => {
             let secs = (val / 1000.0).max(0.0);
-            let _ = mpv_cmd(api, handle, &["seek", &format!("{secs:.3}"), "absolute"]);
+            let _ = mpv_cmd(&api, handle, &["seek", &format!("{secs:.3}"), "absolute+exact"]);
         }
         "seekBack" | "keyboardSeekBack" => {
             let _ = mpv_cmd(api, handle, &["seek", "-10", "relative"]);
@@ -1051,7 +1156,9 @@ fn create_windows_overlay(
     }
     let pos = parent.inner_position().map_err(|e| e.to_string())?;
     let size = parent.inner_size().map_err(|e| e.to_string())?;
-    let parsed_url = controls_url.parse().map_err(|e: url::ParseError| e.to_string())?;
+    let parsed_url = controls_url
+        .parse()
+        .map_err(|e: url::ParseError| e.to_string())?;
 
     let init_script = r#"
       window.chrome = window.chrome || {};
@@ -1107,7 +1214,8 @@ fn ensure_c_lc_numeric() {
     #[cfg(target_os = "linux")]
     unsafe {
         if let Ok(libc) = Library::new("libc.so.6")
-            && let Ok(setlocale) = libc.get::<unsafe extern "C" fn(c_int, *const c_char) -> *const c_char>(b"setlocale\0")
+            && let Ok(setlocale) = libc
+                .get::<unsafe extern "C" fn(c_int, *const c_char) -> *const c_char>(b"setlocale\0")
         {
             // GTK initializes LC_NUMERIC from user locale (e.g. pt_BR.UTF-8), causing libmpv's mpv_create() to return NULL.
             const LC_NUMERIC: c_int = 1;
@@ -1121,6 +1229,7 @@ fn create_and_init_mpv(
     wid: &str,
     headers: Option<&HashMap<String, String>>,
     start_secs: Option<f64>,
+    options: &crate::video_options::VideoOptions,
 ) -> Result<*mut c_void, String> {
     ensure_c_lc_numeric();
 
@@ -1152,6 +1261,15 @@ fn create_and_init_mpv(
         let _ = mpv_set_opt(api, handle, "vd-lavc-software-fallback", "yes");
         let _ = mpv_set_opt(api, handle, "force-seekable", "yes");
         let _ = mpv_set_opt(api, handle, "volume-max", "200");
+        // Bound the demuxer cache: keeps >=20 s lookahead without ballooning RSS.
+        let _ = mpv_set_opt(api, handle, "demuxer-max-bytes", "48MiB");
+        let _ = mpv_set_opt(api, handle, "demuxer-max-back-bytes", "16MiB");
+        // Keep the network cache in memory only and bounded: a long-running
+        // stream must not grow its cache indefinitely.
+        let _ = mpv_set_opt(api, handle, "cache", "auto");
+        let _ = mpv_set_opt(api, handle, "cache-on-disk", "no");
+        let _ = mpv_set_opt(api, handle, "demuxer-readahead-secs", "20");
+        let _ = mpv_set_opt(api, handle, "audio-buffer", "0.5");
         let _ = mpv_set_opt(api, handle, "sub-ass-override", "no");
         let _ = mpv_set_opt(api, handle, "audio-channels", "auto");
 
@@ -1174,6 +1292,20 @@ fn create_and_init_mpv(
             let _ = mpv_set_opt(api, handle, "http-header-fields", &joined.join(","));
         }
 
+        for &(key, value) in &options.options {
+            if let Err(error) = mpv_set_opt(api, handle, key, value) {
+                unsafe { (api.terminate_destroy)(handle) };
+                return Err(error);
+            }
+        }
+        if let Some(path) = &options.config {
+            let filename =
+                CString::new(path.to_string_lossy().as_bytes()).expect("filesystem path");
+            if unsafe { (api.load_config)(handle, filename.as_ptr()) } < 0 {
+                unsafe { (api.terminate_destroy)(handle) };
+                return Err("Falha ao carregar configuração mpv".into());
+            }
+        }
         let rc = unsafe { (api.initialize)(handle) };
         if rc >= 0 {
             return Ok(handle);
@@ -1336,6 +1468,7 @@ fn read_player_state(
         let forced = get_prop_flag(api, handle, &format!("track-list/{i}/forced"));
 
         let track = MediaTrack {
+            external: get_prop_flag(api, handle, &format!("track-list/{i}/external")),
             id,
             track_type: t_type.clone(),
             title: title.clone(),
@@ -1427,6 +1560,9 @@ fn read_player_state(
         speed,
         audio_tracks,
         subtitle_tracks,
+        reference_id: get_prop_i64(api, handle, "secondary-sid"),
+        reference_text: get_prop_string(api, handle, "secondary-sub-text"),
+        reference_start_secs: get_prop_double(api, handle, "secondary-sub-start"),
         chapters,
         media_info,
     };

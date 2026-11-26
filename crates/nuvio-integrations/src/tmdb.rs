@@ -71,13 +71,61 @@ impl TmdbClient {
             "series" | "tv" => "tv",
             _ => "movie",
         };
+        self.get_resource(
+            &format!("{kind}/{tmdb_id}"),
+            "external_ids,images,release_dates,content_ratings,credits,videos,recommendations",
+        )
+        .await
+    }
+
+    pub async fn season(&self, series: u64, season: u32) -> Result<Value> {
+        self.get_resource(&format!("tv/{series}/season/{season}"), "")
+            .await
+    }
+
+    pub async fn collection(&self, id: u64) -> Result<Value> {
+        self.get_resource(&format!("collection/{id}"), "").await
+    }
+
+    pub async fn person(&self, person_id: u64) -> Result<Value> {
+        self.get_resource(
+            &format!("person/{person_id}"),
+            "combined_credits,external_ids",
+        )
+        .await
+    }
+
+    /// Search people by name (used when a cast entry carries no TMDB id).
+    pub async fn search_person(&self, query: &str) -> Result<Value> {
         let resp = self
             .http
-            .get(format!("{TMDB_BASE_URL}/{kind}/{tmdb_id}"))
+            .get(format!("{TMDB_BASE_URL}/search/person"))
             .query(&[
                 ("api_key", self.api_key.as_str()),
                 ("language", self.language.as_str()),
-                ("append_to_response", "external_ids,images,release_dates,content_ratings"),
+                ("query", query),
+            ])
+            .send()
+            .await?;
+        let status = resp.status();
+        let body = resp.text().await?;
+        if !status.is_success() {
+            return Err(IntegrationError::Api {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        Ok(serde_json::from_str(&body)?)
+    }
+
+    async fn get_resource(&self, path: &str, append: &str) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{TMDB_BASE_URL}/{path}"))
+            .query(&[
+                ("api_key", self.api_key.as_str()),
+                ("language", self.language.as_str()),
+                ("append_to_response", append),
             ])
             .send()
             .await?;

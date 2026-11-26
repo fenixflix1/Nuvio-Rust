@@ -111,7 +111,7 @@ pub async fn fetch_plugin_repository(
     manifest_url: &str,
     existing_scrapers: &[PluginScraperItem],
 ) -> Result<(PluginRepoItem, Vec<PluginScraperItem>), String> {
-    let client = reqwest::Client::builder()
+    let client = nuvio_core::storage::dns::client_builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| e.to_string())?;

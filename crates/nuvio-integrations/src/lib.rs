@@ -23,7 +23,7 @@ pub enum IntegrationError {
 pub type Result<T> = std::result::Result<T, IntegrationError>;
 
 pub(crate) fn default_http_client() -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
+    Ok(nuvio_storage::dns::client_builder()
         .user_agent("NuvioDesktop-Rust/0.1.0")
         .timeout(std::time::Duration::from_secs(8))
         .build()?)
