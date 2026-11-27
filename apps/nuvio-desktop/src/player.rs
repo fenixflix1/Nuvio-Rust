@@ -605,7 +605,8 @@ mod platform_host {
             w: u32,
             h: u32,
         ) -> Result<Self, String> {
-            let user32 = Arc::new(Library::new("user32.dll").map_err(|e| e.to_string())?);
+            let user32 =
+                Arc::new(unsafe { Library::new("user32.dll") }.map_err(|e| e.to_string())?);
             let owner_tid = unsafe {
                 let get_win_tid: Symbol<GetWindowThreadProcessIdFn> = user32
                     .get(b"GetWindowThreadProcessId\0")

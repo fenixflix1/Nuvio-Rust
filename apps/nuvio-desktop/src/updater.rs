@@ -141,18 +141,12 @@ fn select_platform_asset<'a>(
     }
 }
 
+#[cfg(target_os = "linux")]
 fn current_appimage_path() -> Option<PathBuf> {
-    #[cfg(target_os = "linux")]
-    {
-        std::env::var_os("APPIMAGE")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .filter(|p| p.exists())
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
+    std::env::var_os("APPIMAGE")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
 }
 
 fn can_self_install_on_host(asset: Option<&GitHubAsset>) -> bool {
