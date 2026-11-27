@@ -814,16 +814,44 @@ async fn start_continue_watching(
         .flatten()
         .unwrap_or(1) as i32;
 
-    let Some(session) = load_session_inner(&state.kv) else {
-        return Ok(ProgressiveStartAck { total: 0 });
-    };
-    let (client, _) = ensure_supabase_client(&state).await?;
-    client.import_session(session);
+    let local_entries: Vec<WatchProgressSyncEntry> = load_local_progress_inner(&state.kv)
+        .into_values()
+        .collect();
 
-    let mut entries = client
-        .pull_watch_progress(active_profile_index, 60)
-        .await
-        .map_err(format_supabase_err)?;
+    let mut entries: Vec<WatchProgressSyncEntry> = Vec::new();
+    let mut fetched_cloud = false;
+    if let Some(session) = load_session_inner(&state.kv)
+        && let Ok((client, _)) = ensure_supabase_client(&state).await
+    {
+        client.import_session(session);
+        match client.pull_watch_progress(active_profile_index, 60).await {
+            Ok(cloud) => {
+                entries = cloud;
+                fetched_cloud = true;
+            }
+            Err(err) => tracing::warn!(
+                "Continue watching: falha ao buscar progresso na nuvem ({err}); usando o progresso local"
+            ),
+        }
+    }
+
+    // Sem sessão, offline ou com a nuvem indisponível, o progresso local mantém
+    // "Continuar Assistindo" funcionando em vez de esconder a fileira.
+    if !fetched_cloud {
+        entries = local_entries;
+    } else if load_profiles_inner(&state.kv).len() <= 1 {
+        // Conta com um único perfil: preserva o que foi assistido sem rede e
+        // ainda não subiu para a nuvem.
+        let mut seen: HashSet<String> = entries
+            .iter()
+            .map(|e| e.progress_key.clone())
+            .collect();
+        for entry in local_entries {
+            if seen.insert(entry.progress_key.clone()) {
+                entries.push(entry);
+            }
+        }
+    }
 
     entries.sort_by_key(|a| std::cmp::Reverse(a.last_watched));
 
@@ -2035,7 +2063,13 @@ fn player_focus_overlay(state: State<'_, AppState>) {
 }
 
 #[tauri::command]
-fn player_ui_message(app: AppHandle, event_type: String, value: f64) {
+fn player_ui_message(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    event_type: String,
+    value: f64,
+) {
+    state.player.handle_ui_action(&event_type, value);
     let _ = app.emit(
         "player:ui_event",
         PlayerUiEventPayload { event_type, value },
@@ -2222,9 +2256,10 @@ async fn player_stop(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn window_toggle_fullscreen(window: WebviewWindow) -> Result<bool, String> {
-    let current = window.is_fullscreen().map_err(|e| e.to_string())?;
-    window
+fn window_toggle_fullscreen(app: AppHandle, window: WebviewWindow) -> Result<bool, String> {
+    let target = app.get_webview_window("main").unwrap_or(window);
+    let current = target.is_fullscreen().map_err(|e| e.to_string())?;
+    target
         .set_fullscreen(!current)
         .map_err(|e| e.to_string())?;
     Ok(!current)
@@ -2657,6 +2692,7 @@ fn main() {
             party::party_set_chat_open,
             party::party_remove_member,
             services::tmdb_season_episodes,
+            services::tmdb_next_episodes,
             services::person_details,
             services::resolve_people_photos,
             services::hero_ratings,
@@ -2723,6 +2759,29 @@ fn main() {
             window_toggle_fullscreen,
             launch_mpv,
         ])
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            match event {
+                tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+                    if let Some(main_win) = window.app_handle().get_webview_window("main") {
+                        window
+                            .app_handle()
+                            .state::<AppState>()
+                            .player
+                            .sync_windows_overlay_bounds(&main_win);
+                    }
+                }
+                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed => {
+                    window.app_handle().state::<AppState>().player.stop();
+                    if let Some(ov) = window.app_handle().get_webview_window("player-overlay") {
+                        let _ = ov.close();
+                    }
+                }
+                _ => {}
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running Nuvio Desktop Tauri application");
 }

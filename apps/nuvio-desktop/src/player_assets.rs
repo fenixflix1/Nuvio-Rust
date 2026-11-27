@@ -27,9 +27,9 @@ pub fn export_player_ui_assets(cache_dir: &Path) -> Result<String, String> {
     write_if_missing_or_diff(&font_bold, FONT_BOLD)?;
 
     let font_faces = format!(
-        "@font-face {{ font-family: 'NuvioSans'; src: url('{}') format('truetype'); font-weight: 400; font-style: normal; }}\n\
-         @font-face {{ font-family: 'NuvioSans'; src: url('{}') format('truetype'); font-weight: 500 600; font-style: normal; }}\n\
-         @font-face {{ font-family: 'NuvioSans'; src: url('{}') format('truetype'); font-weight: 700; font-style: normal; }}\n",
+        "@font-face {{ font-family: 'Nuvio JetBrains Sans'; src: url('{}') format('truetype'); font-weight: 400; font-style: normal; }}\n\
+         @font-face {{ font-family: 'Nuvio JetBrains Sans'; src: url('{}') format('truetype'); font-weight: 500 600; font-style: normal; }}\n\
+         @font-face {{ font-family: 'Nuvio JetBrains Sans'; src: url('{}') format('truetype'); font-weight: 700; font-style: normal; }}\n",
         path_to_file_url(&font_reg),
         path_to_file_url(&font_semi),
         path_to_file_url(&font_bold),

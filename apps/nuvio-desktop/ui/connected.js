@@ -7,10 +7,13 @@ for (const [provider, name] of Object.entries(connectedNames)) {
   const card = document.createElement('div');
   card.className = 'nv-account';
   card.dataset.account = provider;
-  card.innerHTML = '<div class="nv-row"><span class="nv-copy"><span class="nv-title"></span><span class="nv-desc"></span><span class="nv-account-extra"></span></span><span class="nv-account-side"><span role="status" class="nv-value">Não definido</span><span class="nv-account-actions"><button class="btn-accent" data-action="login">Conectar</button><button class="btn-ghost" data-action="disconnect" hidden>Desconectar</button></span></span></div><details class="nv-account-manual"><summary>Conexão manual</summary><div class="nv-manual-body"><label class="field-col">Chave de API<input type="password" autocomplete="off"></label><button class="btn-ghost" data-action="key">Conectar com chave</button></div></details>';
+  const icon = provider === 'torbox'
+    ? '<img src="assets/torbox_logo.png" alt="" />'
+    : '<span class="nv-link-icon">🔗</span>';
+  card.innerHTML = `<div class="nv-row"><span class="service-icon" aria-hidden="true">${icon}</span><span class="nv-copy"><span class="nv-title"></span><span class="nv-desc"></span><span class="nv-account-extra"></span></span><span class="nv-account-side"><span role="status" class="nv-value">Não definido</span><span class="nv-account-actions"><button class="btn-accent nv-mini-btn" data-action="login">Conectar</button><button class="btn-ghost nv-mini-btn" data-action="disconnect" hidden>Desconectar</button></span></span></div><details class="nv-account-manual"><summary>Colar token / chave de API</summary><div class="nv-manual-body"><label class="field-col">Token de API<input type="password" autocomplete="off" placeholder="Cole seu token aqui"></label><button class="btn-ghost nv-mini-btn" data-action="key">Conectar com token</button></div></details>`;
   card.querySelector('.nv-title').textContent = name;
   card.querySelector('.nv-desc').textContent = provider === 'torbox'
-    ? 'Vincule sua conta Torbox no navegador.' : 'Vincule sua conta Premiumize no navegador.';
+    ? 'Vincule sua conta Torbox no navegador ou cole seu token abaixo.' : 'Vincule sua conta Premiumize no navegador ou cole sua chave abaixo.';
   if (provider === 'premiumize') {
     const label = document.createElement('label');
     label.className = 'field-col';
@@ -114,7 +117,7 @@ async function loadCloudFiles() {
     const results = await Promise.allSettled(active.map(provider => invoke('connected_files',{provider})));
     if (serial !== cloudRequest) return;
     list.replaceChildren();
-    if (!active.length) list.textContent = 'Conecte uma conta em Ajustes → Serviços conectados.';
+    if (!active.length) list.textContent = 'Conecte uma conta em Ajustes → Integrações.';
     results.forEach((result,i) => {
       const name = connectedNames[active[i]];
       const title = document.createElement('strong');

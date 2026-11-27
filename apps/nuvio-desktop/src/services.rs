@@ -767,6 +767,67 @@ pub async fn tmdb_season_episodes(
 }
 
 #[tauri::command]
+pub async fn tmdb_next_episodes(
+    state: tauri::State<'_, crate::AppState>,
+    series: Vec<u64>,
+) -> Result<Vec<Value>, String> {
+    let s = crate::load_settings_inner(&state.kv);
+    if !s.services.tmdb_enabled || s.tmdb_api_key.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let client = TmdbClient::new(s.tmdb_api_key, s.services.tmdb_language)
+        .map_err(|_| "Falha ao configurar o TMDB")?;
+    let mut ids: Vec<u64> = series.into_iter().take(120).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut pending = ids.into_iter();
+    let mut tasks: tokio::task::JoinSet<Option<Value>> = tokio::task::JoinSet::new();
+    let spawn = |tasks: &mut tokio::task::JoinSet<Option<Value>>, id: u64| {
+        let client = client.clone();
+        tasks.spawn(async move {
+            let data = client.details("tv", id).await.ok()?;
+            let ep = &data["next_episode_to_air"];
+            let released = ep["air_date"].as_str().unwrap_or("").to_string();
+            if released.is_empty() {
+                return None;
+            }
+            Some(json!({
+                "tmdb_id": id,
+                "name": data["name"],
+                "season": ep["season_number"],
+                "episode": ep["episode_number"],
+                "title": ep["name"],
+                "overview": ep["overview"],
+                "released": released,
+                "poster": image(&data["poster_path"], "w342"),
+            }))
+        });
+    };
+    for _ in 0..8 {
+        match pending.next() {
+            Some(id) => spawn(&mut tasks, id),
+            None => break,
+        }
+    }
+    let mut out = Vec::new();
+    while let Some(res) = tasks.join_next().await {
+        if let Ok(Some(value)) = res {
+            out.push(value);
+        }
+        if let Some(id) = pending.next() {
+            spawn(&mut tasks, id);
+        }
+    }
+    out.sort_by(|a, b| {
+        a["released"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["released"].as_str().unwrap_or(""))
+    });
+    Ok(out)
+}
+
+#[tauri::command]
 pub async fn hero_ratings(
     state: tauri::State<'_, crate::AppState>,
     id: String,

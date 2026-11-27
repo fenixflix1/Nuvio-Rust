@@ -120,8 +120,6 @@
           <span class="sidebar-label" id="sidebar-profile-name">Perfil</span>
         </button>
 
-        <div class="profile-switcher-stack hidden" id="profile-switcher-stack"></div>
-
         <nav class="sidebar-nav">
           <button class="sidebar-item active" data-tab="home">
             <div class="sidebar-icon-slot">
@@ -149,6 +147,9 @@
           </button>
         </nav>
       </aside>
+
+      <!-- Floating profile switcher: fixed so the collapsed sidebar never clips it -->
+      <div class="profile-switcher-stack hidden" id="profile-switcher-stack"></div>
 
       <main class="main-viewport" id="main-viewport">
         <!-- HOME TAB -->
@@ -267,10 +268,16 @@
           <div class="library-source-tabs" role="tablist" aria-label="Seções da biblioteca">
             <button class="library-source-chip active" data-library-tab="saved" role="tab" aria-selected="true" type="button">Salvo</button>
             <button class="library-source-chip" data-library-tab="following" role="tab" aria-selected="false" type="button">Seguindo</button>
+            <button class="library-source-chip" data-library-tab="calendar" role="tab" aria-selected="false" type="button">Calendário</button>
           </div>
 
           <div id="library-panel-saved">
             <div id="library-grid" class="library-shelves"></div>
+          </div>
+
+          <div id="library-panel-calendar" hidden>
+            <div id="library-calendar-status" class="muted"></div>
+            <div id="library-calendar"></div>
           </div>
 
           <div id="library-panel-following" hidden>
@@ -306,6 +313,10 @@
                 <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4m0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4"/></svg></span>
                 <span>Conta &amp; Perfis</span>
               </button>
+              <button class="settings-cat-btn" data-settings-page="group-session" id="btn-open-group-session">
+                <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3m-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3m0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5m8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5"/></svg></span>
+                <span>Sessão em grupo</span>
+              </button>
               <div class="settings-group-label">Visual</div>
               <button class="settings-cat-btn" data-settings-sec="appearance">
                 <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M12 3a9 9 0 0 0 0 18c.83 0 1.5-.67 1.5-1.5 0-.39-.15-.74-.39-1.01-.23-.26-.38-.61-.38-.99 0-.83.67-1.5 1.5-1.5H16c2.76 0 5-2.24 5-5 0-4.42-4.03-8-9-8m-5.5 9c-.83 0-1.5-.67-1.5-1.5S5.67 9 6.5 9 8 9.67 8 10.5 7.33 12 6.5 12m3-4C8.67 8 8 7.33 8 6.5S8.67 5 9.5 5s1.5.67 1.5 1.5S10.33 8 9.5 8m5 0c-.83 0-1.5-.67-1.5-1.5S13.67 5 14.5 5s1.5.67 1.5 1.5S15.33 8 14.5 8m3 4c-.83 0-1.5-.67-1.5-1.5S16.67 9 17.5 9s1.5.67 1.5 1.5-.67 1.5-1.5 1.5"/></svg></span>
@@ -315,7 +326,7 @@
                 <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M4 11h5V5H4zm0 7h5v-6H4zm6 0h5v-6h-5zm6 0h5v-6h-5zm-6-7h5V5h-5zm6-6v6h5V5z"/></svg></span>
                 <span>Layout &amp; Navegação</span>
               </button>
-              <div class="settings-group-label">Assistir</div>
+              <div class="settings-group-label">Mídia</div>
               <button class="settings-cat-btn" data-settings-sec="addons">
                 <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M20.5 11H19V7a2 2 0 0 0-2-2h-4V3.5a2.5 2.5 0 0 0-5 0V5H4a2 2 0 0 0-1.99 2v3.8h1.5a2.7 2.7 0 0 1 0 5.4H2V20a2 2 0 0 0 2 2h3.8v-1.5a2.7 2.7 0 0 1 5.4 0V22H17a2 2 0 0 0 2-2v-4h1.5a2.5 2.5 0 0 0 0-5"/></svg></span>
                 <span>Addons</span>
@@ -328,17 +339,14 @@
                 <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M8 5v14l11-7z"/></svg></span>
                 <span>Player, Legendas &amp; Skip</span>
               </button>
-              <div class="settings-group-label">Serviços &amp; Sistema</div>
-              <button class="settings-cat-btn" data-settings-sec="simkl"><span>Simkl e fontes</span></button>
               <button class="settings-cat-btn" data-settings-sec="collections">
                 <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8z"/></svg></span>
                 <span>Coleções</span>
               </button>
-              <button class="settings-cat-btn" data-settings-sec="connected"><span>Serviços conectados</span></button>
-              <button class="settings-cat-btn" data-settings-sec="services">
-                <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2m-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39"/></svg></span>
-                <span>Discord, TMDB e MDBList</span>
-              </button>
+              <div class="settings-group-label">Serviços</div>
+              <button class="settings-cat-btn" data-settings-sec="connected"><span class="settings-cat-icon">🔗</span><span>Integrações</span></button>
+              <button class="settings-cat-btn" data-settings-sec="simkl"><span>Simkl e fontes</span></button>
+              <div class="settings-group-label">Sistema</div>
               <button class="settings-cat-btn" data-settings-sec="system">
                 <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94s-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.74 8.87a.49.49 0 0 0 .12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 0 0-.12-.61zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6"/></svg></span>
                 <span>Rede &amp; Sistema</span>
@@ -353,7 +361,6 @@
                   <div class="nv-sheet">
                     <div class="nv-row"><span class="nv-copy"><span class="nv-title">Status</span></span><strong class="nv-value nv-strong" id="set-account-status">-</strong></div>
                     <div class="nv-row"><span class="nv-copy"><span class="nv-title">E-mail</span></span><strong class="nv-value nv-strong" id="set-account-email">-</strong></div>
-                    <div class="nv-row"><span class="nv-copy"><span class="nv-title">Servidor</span></span><strong class="nv-value nv-strong" id="set-account-server">-</strong></div>
                     <div class="nv-row"><span class="nv-copy"><span class="nv-title">Perfil ativo</span></span><strong class="nv-value nv-strong" id="set-account-profile">-</strong></div>
                   </div>
                 </div>
@@ -725,80 +732,10 @@
               </div>
 
               <div class="settings-section" id="sec-connected">
-                <div class="nv-screen-title"><h2>Serviços conectados</h2></div>
+                <div class="nv-screen-title"><h2>Integrações</h2></div>
 
                 <div class="nv-group">
-                  <div class="nv-group-label">Serviços conectados</div>
-                  <div class="nv-sheet">
-                    <p class="nv-note">Estas integrações são experimentais e podem ser mantidas, alteradas ou removidas posteriormente.</p>
-                    <label class="nv-row">
-                      <span class="nv-copy"><span class="nv-title">Biblioteca na nuvem</span><span class="nv-desc">Navegue e reproduza arquivos que já estão nas suas contas conectadas.</span></span>
-                      <span class="nuvio-switch"><input type="checkbox" data-connected-pref="connected.library" /><span class="nuvio-switch-track"></span></span>
-                    </label>
-                    <label class="nv-row">
-                      <span class="nv-copy"><span class="nv-title">Resolver links reproduzíveis</span><span class="nv-desc">Solicita links reproduzíveis a um serviço conectado quando um resultado precisar. Isso pode adicionar o item a esse serviço.</span></span>
-                      <span class="nuvio-switch"><input type="checkbox" data-connected-pref="connected.resolve" /><span class="nuvio-switch-track"></span></span>
-                    </label>
-                  </div>
-                </div>
-
-                <div class="nv-group">
-                  <div class="nv-group-label">Contas</div>
-                  <div class="nv-sheet" id="connected-provider-cards"></div>
-                </div>
-
-                <div class="nv-group">
-                  <div class="nv-sheet">
-                    <details class="nv-details">
-                      <summary>Saiba mais</summary>
-                      <p class="nv-note">Ative a biblioteca na nuvem e abra Biblioteca → Arquivos na nuvem para reproduzir seus vídeos. Para resolver magnets, o player consulta primeiro o Torbox e depois o Premiumize entre as contas conectadas.</p>
-                    </details>
-                  </div>
-                </div>
-              </div>
-
-              <div class="settings-section" id="sec-services">
-                <div class="nv-screen-title"><h2>Discord, TMDB e MDBList</h2></div>
-
-                <div class="nv-group">
-                  <div class="nv-group-label">Discord</div>
-                  <div class="nv-sheet">
-                    <label class="nv-row">
-                      <span class="nv-copy"><span class="nv-title">Discord Rich Presence</span><span class="nv-desc">Mostra no seu perfil do Discord o que você está navegando ou assistindo. Desativado por padrão.</span></span>
-                      <span class="nuvio-switch"><input type="checkbox" data-service="discord_enabled" /><span class="nuvio-switch-track"></span></span>
-                    </label>
-                    <label class="nv-row">
-                      <span class="nv-copy"><span class="nv-title">Estilo de presença</span></span>
-                      <select class="nv-value" data-service="discord_style"><option value="watching">Assistindo</option><option value="playing">Jogando</option></select>
-                    </label>
-                    <label class="nv-row">
-                      <span class="nv-copy"><span class="nv-title">Atividade compartilhada</span></span>
-                      <select class="nv-value" data-service="discord_scope"><option value="all">Toda a atividade</option><option value="playback">Somente reprodução</option></select>
-                    </label>
-                    <label class="nv-row">
-                      <span class="nv-copy"><span class="nv-title">Pôster vertical completo</span><span class="nv-desc">Exibe o pôster inteiro no Discord sem cortar em quadrado.</span></span>
-                      <span class="nuvio-switch"><input type="checkbox" data-service="portrait" /><span class="nuvio-switch-track"></span></span>
-                    </label>
-                    <label class="nv-row">
-                      <span class="nv-copy"><span class="nv-title">Mostrar miniatura do episódio</span><span class="nv-desc">Exibe a imagem do episódio ao lado do pôster no Discord.</span></span>
-                      <span class="nuvio-switch"><input type="checkbox" data-service="episode_image" /><span class="nuvio-switch-track"></span></span>
-                    </label>
-                    <label class="nv-row">
-                      <span class="nv-copy"><span class="nv-title">Mostrar nome do episódio</span><span class="nv-desc">Exibe o número e o nome do episódio no Discord. Ao desativar, mostra Assistindo ou Pausado.</span></span>
-                      <span class="nuvio-switch"><input type="checkbox" data-service="episode_name" /><span class="nuvio-switch-track"></span></span>
-                    </label>
-                    <div class="nv-row">
-                      <span class="nv-copy"><span class="nv-title">Status da conexão</span><span class="nv-desc" id="discord-presence-status">Desativada.</span></span>
-                      <button class="nv-mini-btn" id="btn-discord-connect" type="button">Conectar agora</button>
-                    </div>
-                    <div class="nv-row">
-                      <span class="nv-copy"><span class="nv-title">Como funciona no PC</span><span class="nv-desc">O Discord não permite login web para status. Abra o Discord, Vesktop ou WebCord no PC e clique em <strong>Conectar agora</strong> (ou use o bridge arRPC se abrir pelo navegador). No Serein, ative Game Activity antes.</span></span>
-                    </div>
-                  </div>
-                </div>
-
-                <div class="nv-group">
-                  <div class="nv-group-label">Provedores</div>
+                  <div class="nv-group-label">Integrações</div>
                   <div class="nv-sheet">
                     <details class="nv-provider">
                       <summary>
@@ -832,16 +769,58 @@
                       <div class="service-fields stack-gap">
                         <label class="toggle-row"><span>Mostrar notas externas nos detalhes</span><span class="nuvio-switch"><input type="checkbox" data-service="mdblist_enabled" /><span class="nuvio-switch-track"></span></span></label>
                         <label class="toggle-row"><span>Mostrar notas também no destaque da tela inicial</span><span class="nuvio-switch"><input type="checkbox" data-service="mdblist_hero" /><span class="nuvio-switch-track"></span></span></label>
-                        <label class="field-col">Chave de API do MDBList<input type="password" data-service="mdblist_key" /></label>
+                        <label class="field-col">Chave de API do MDBList<input type="password" data-service="mdblist_key" placeholder="Cole sua chave aqui" /></label>
                         <fieldset><legend>Provedores de notas</legend><div id="rating-providers" class="row-gap"></div></fieldset>
                       </div>
                     </details>
+                    <button class="nv-row nv-link-row" id="btn-open-connected-services" type="button">
+                      <span class="service-icon"><img src="assets/torbox_logo.png" alt="" /></span>
+                      <span class="nv-copy"><span class="nv-title">Serviços conectados</span><span class="nv-desc">Conecte contas para links e acesso à biblioteca</span></span>
+                      <span class="nv-chevron">›</span>
+                    </button>
                   </div>
                 </div>
 
                 <div class="nv-actions">
-                  <button class="btn-accent" id="btn-save-services">Salvar serviços</button>
                   <span class="status-text" id="services-status" role="status"></span>
+                </div>
+              </div>
+
+              <div class="settings-section" id="sec-cloud">
+                <div class="nv-screen-title nv-title-with-back">
+                  <button class="circle-back-btn" id="btn-cloud-back" title="Voltar" type="button">
+                    <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M15.41 7.41L14 6l-6 6l6 6l1.41-1.41L10.83 12z"/></svg>
+                  </button>
+                  <h2>Serviços conectados</h2>
+                </div>
+
+                <div class="nv-group">
+                  <div class="nv-group-label">Serviços conectados</div>
+                  <div class="nv-sheet">
+                    <p class="nv-note">Estas integrações são experimentais e podem ser mantidas, alteradas ou removidas posteriormente.</p>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Biblioteca na nuvem</span><span class="nv-desc">Navegue e reproduza arquivos que já estão nas suas contas conectadas.</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" data-connected-pref="connected.library" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Resolver links reproduzíveis</span><span class="nv-desc">Solicita links reproduzíveis a um serviço conectado quando um resultado precisar. Isso pode adicionar o item a esse serviço.</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" data-connected-pref="connected.resolve" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="nv-group">
+                  <div class="nv-group-label">Contas</div>
+                  <div class="nv-sheet" id="connected-provider-cards"></div>
+                </div>
+
+                <div class="nv-group">
+                  <div class="nv-sheet">
+                    <details class="nv-details">
+                      <summary>Saiba mais</summary>
+                      <p class="nv-note">Ative a biblioteca na nuvem e abra Biblioteca → Arquivos na nuvem para reproduzir seus vídeos. Para resolver magnets, o player consulta primeiro o Torbox e depois o Premiumize entre as contas conectadas.</p>
+                    </details>
+                  </div>
                 </div>
               </div>
 
@@ -957,36 +936,38 @@
                 </div>
 
                 <div class="nv-group">
-                  <div class="nv-group-label">Watch party</div>
+                  <div class="nv-group-label">Avançado</div>
                   <div class="nv-sheet">
-                    <div class="nv-row nv-row-stack">
-                      <span class="nv-copy">
-                        <span class="nv-title">Assistir junto</span>
-                        <span class="nv-desc">Reprodução sincronizada entre contas Nuvio. Para criar uma sala, abra um vídeo e clique no ícone de Watch party no player. Para entrar em uma sala existente, informe o código abaixo.</span>
-                      </span>
-                      <span class="nv-desc" id="party-status">Nenhuma sala ativa.</span>
-                    </div>
-                    <div class="nv-row" id="party-code-row" hidden>
-                      <span class="nv-copy"><span class="nv-title">Código da sala</span></span>
-                      <span class="nv-title" id="party-code" style="letter-spacing:4px;font-size:20px;"></span>
-                    </div>
-                    <div class="nv-row nv-row-stack" id="party-members-row" hidden>
-                      <span class="nv-copy"><span class="nv-title">Quem está junto</span></span>
-                      <span class="nv-desc" id="party-members"></span>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Discord Rich Presence</span><span class="nv-desc">Mostra no seu perfil do Discord o que você está navegando ou assistindo. Desativado por padrão.</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" data-service="discord_enabled" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Estilo de presença</span></span>
+                      <select class="nv-value" data-service="discord_style"><option value="watching">Assistindo</option><option value="playing">Jogando</option></select>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Atividade compartilhada</span></span>
+                      <select class="nv-value" data-service="discord_scope"><option value="all">Toda a atividade</option><option value="playback">Somente reprodução</option></select>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Pôster vertical completo</span><span class="nv-desc">Exibe o pôster inteiro no Discord sem cortar em quadrado.</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" data-service="portrait" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Mostrar miniatura do episódio</span><span class="nv-desc">Exibe a imagem do episódio ao lado do pôster no Discord.</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" data-service="episode_image" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Mostrar nome do episódio</span><span class="nv-desc">Exibe o número e o nome do episódio no Discord. Ao desativar, mostra Assistindo ou Pausado.</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" data-service="episode_name" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <div class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Status da conexão</span><span class="nv-desc" id="discord-presence-status">Desativada.</span></span>
+                      <button class="btn-ghost nv-mini-btn" id="btn-discord-connect" type="button">Conectar agora</button>
                     </div>
                     <div class="nv-row">
-                      <span class="nv-copy"><span class="nv-title">Entrar com código</span></span>
-                      <span style="display:flex;gap:8px;align-items:center;">
-                        <input type="text" id="party-join-code" class="nv-input" maxlength="6" placeholder="ABC123" style="width:120px;text-transform:uppercase;letter-spacing:2px;" />
-                        <button class="nv-mini-btn" id="btn-party-join" type="button">Entrar</button>
-                      </span>
-                    </div>
-                    <div class="nv-row" id="party-active-row" hidden>
-                      <span class="nv-copy"><span class="nv-title">Sair da sala</span></span>
-                      <span style="display:flex;gap:8px;">
-                        <button class="nv-mini-btn" id="btn-party-leave" type="button">Sair</button>
-                        <button class="nv-mini-btn" id="btn-party-end" type="button">Encerrar</button>
-                      </span>
+                      <span class="nv-copy"><span class="nv-title">Como funciona no PC</span><span class="nv-desc">O Discord não permite login web para status. Abra o Discord, Vesktop ou WebCord no PC e clique em <strong>Conectar agora</strong> (ou use o bridge arRPC se abrir pelo navegador). No Serein, ative Game Activity antes.</span></span>
                     </div>
                   </div>
                 </div>
@@ -995,6 +976,60 @@
           </div>
         </section>
       </main>
+    </div>
+  </div>
+
+  <!-- GROUP SESSION: JOIN BY CODE -->
+  <div id="view-party" class="view">
+    <div class="party-page">
+      <div class="party-page-head">
+        <button class="circle-back-btn" id="btn-party-page-back" title="Voltar" type="button">
+          <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M15.41 7.41L14 6l-6 6l6 6l1.41-1.41L10.83 12z"/></svg>
+        </button>
+        <h1>Sessão em grupo</h1>
+      </div>
+      <div class="party-page-body">
+        <div class="party-page-avatars" aria-hidden="true">
+          <span class="party-page-avatar filled" id="party-page-avatar-self">N</span>
+          <span class="party-page-avatar dashed">+</span>
+          <span class="party-page-avatar dashed">+</span>
+        </div>
+        <h2>Entrar em uma sessão em grupo</h2>
+        <p class="party-page-sub">Insira o código de 6 caracteres que seu amigo compartilhou.</p>
+        <div class="party-code-boxes" id="party-code-boxes">
+          <input class="party-code-box" maxlength="1" autocomplete="off" spellcheck="false" inputmode="text" aria-label="Caractere 1" />
+          <input class="party-code-box" maxlength="1" autocomplete="off" spellcheck="false" inputmode="text" aria-label="Caractere 2" />
+          <input class="party-code-box" maxlength="1" autocomplete="off" spellcheck="false" inputmode="text" aria-label="Caractere 3" />
+          <input class="party-code-box" maxlength="1" autocomplete="off" spellcheck="false" inputmode="text" aria-label="Caractere 4" />
+          <input class="party-code-box" maxlength="1" autocomplete="off" spellcheck="false" inputmode="text" aria-label="Caractere 5" />
+          <input class="party-code-box" maxlength="1" autocomplete="off" spellcheck="false" inputmode="text" aria-label="Caractere 6" />
+        </div>
+        <button class="party-enter-btn" id="btn-party-page-enter" type="button" disabled>Entrar</button>
+        <p class="party-page-error" id="party-page-error" role="status"></p>
+        <p class="party-page-note">As sessões em grupo são experimentais e podem não funcionar como esperado.</p>
+        <p class="party-page-hint">Para ser o anfitrião, inicie uma sessão pelo player.</p>
+        <div class="party-page-active nv-sheet" id="party-page-active" hidden>
+          <div class="nv-row nv-row-stack">
+            <span class="nv-copy"><span class="nv-title">Sala atual</span></span>
+            <span class="nv-desc" id="party-status">Nenhuma sala ativa.</span>
+          </div>
+          <div class="nv-row" id="party-code-row" hidden>
+            <span class="nv-copy"><span class="nv-title">Código da sala</span></span>
+            <span class="nv-title" id="party-code" style="letter-spacing:4px;font-size:20px;"></span>
+          </div>
+          <div class="nv-row nv-row-stack" id="party-members-row" hidden>
+            <span class="nv-copy"><span class="nv-title">Quem está junto</span></span>
+            <span class="nv-desc" id="party-members"></span>
+          </div>
+          <div class="nv-row" id="party-active-row" hidden>
+            <span class="nv-copy"><span class="nv-title">Sair da sala</span></span>
+            <span style="display:flex;gap:8px;">
+              <button class="btn-ghost nv-mini-btn" id="btn-party-leave" type="button">Sair</button>
+              <button class="btn-ghost nv-mini-btn" id="btn-party-end" type="button">Encerrar</button>
+            </span>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 

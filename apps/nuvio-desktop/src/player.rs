@@ -161,16 +161,36 @@ struct MpvApi {
 
 impl MpvApi {
     fn load() -> Result<Self, String> {
-        let candidates: &[&str] = if cfg!(target_os = "windows") {
-            &["libmpv-2.dll", "mpv-2.dll"]
+        let mut candidates: Vec<std::ffi::OsString> = Vec::new();
+        if cfg!(target_os = "windows") {
+            if let Some(env_path) = std::env::var_os("NUVIO_LIBMPV_PATH")
+                && !env_path.is_empty()
+            {
+                candidates.push(env_path);
+            }
+            if let Ok(exe_path) = std::env::current_exe()
+                && let Some(exe_dir) = exe_path.parent()
+            {
+                candidates.push(exe_dir.join("libmpv-2.dll").into_os_string());
+                candidates.push(exe_dir.join("mpv-2.dll").into_os_string());
+                candidates.push(exe_dir.join("runtime").join("libmpv-2.dll").into_os_string());
+                candidates.push(exe_dir.join("native").join("libmpv-2.dll").into_os_string());
+            }
+            candidates.push("libmpv-2.dll".into());
+            candidates.push("mpv-2.dll".into());
+            candidates.push(r"C:\Program Files (x86)\Nuvio\app\native\libmpv-2.dll".into());
+            candidates.push(r"C:\Program Files\Nuvio\app\native\libmpv-2.dll".into());
+            candidates.push(r"C:\msys64\ucrt64\bin\libmpv-2.dll".into());
         } else if cfg!(target_os = "macos") {
-            &["libmpv.2.dylib", "libmpv.dylib"]
+            candidates.push("libmpv.2.dylib".into());
+            candidates.push("libmpv.dylib".into());
         } else {
-            &["libmpv.so.2", "libmpv.so"]
-        };
+            candidates.push("libmpv.so.2".into());
+            candidates.push("libmpv.so".into());
+        }
 
         let mut last_err = String::new();
-        for &name in candidates {
+        for name in &candidates {
             match unsafe { Library::new(name) } {
                 Ok(lib) => unsafe {
                     let create: Symbol<MpvCreateFn> =
@@ -390,7 +410,12 @@ mod platform_host {
 
     const WS_CHILD: u32 = 0x40000000;
     const WS_VISIBLE: u32 = 0x10000000;
+    const WS_CLIPCHILDREN: u32 = 0x02000000;
     const WS_CLIPSIBLINGS: u32 = 0x04000000;
+    const HWND_TOP: isize = 0;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    const SWP_SHOWWINDOW: u32 = 0x0040;
+    const SWP_NOCOPYBITS: u32 = 0x0100;
 
     type CreateWindowExWFn = unsafe extern "system" fn(
         u32,
@@ -406,14 +431,14 @@ mod platform_host {
         isize,
         *mut c_void,
     ) -> isize;
-    type MoveWindowFn =
-        unsafe extern "system" fn(isize, c_int, c_int, c_int, c_int, c_int) -> c_int;
+    type SetWindowPosFn =
+        unsafe extern "system" fn(isize, isize, c_int, c_int, c_int, c_int, u32) -> c_int;
     type DestroyWindowFn = unsafe extern "system" fn(isize) -> c_int;
 
     pub struct ChildSurface {
         _user32: Library,
         hwnd: isize,
-        move_window: MoveWindowFn,
+        set_window_pos: SetWindowPosFn,
         destroy_window: DestroyWindowFn,
     }
 
@@ -426,22 +451,26 @@ mod platform_host {
                 let create_win: Symbol<CreateWindowExWFn> = user32
                     .get(b"CreateWindowExW\0")
                     .map_err(|e| e.to_string())?;
-                let move_window: Symbol<MoveWindowFn> =
-                    user32.get(b"MoveWindow\0").map_err(|e| e.to_string())?;
-                let destroy_window: Symbol<DestroyWindowFn> =
-                    user32.get(b"DestroyWindow\0").map_err(|e| e.to_string())?;
+                let set_window_pos: Symbol<SetWindowPosFn> = user32
+                    .get(b"SetWindowPos\0")
+                    .map_err(|e| e.to_string())?;
+                let destroy_window: Symbol<DestroyWindowFn> = user32
+                    .get(b"DestroyWindow\0")
+                    .map_err(|e| e.to_string())?;
 
                 let class_name: Vec<u16> = "STATIC\0".encode_utf16().collect();
                 let title: Vec<u16> = "NuvioVideo\0".encode_utf16().collect();
+                let cw = w.max(16) as c_int;
+                let ch = h.max(16) as c_int;
                 let hwnd = create_win(
                     0,
                     class_name.as_ptr(),
                     title.as_ptr(),
-                    WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+                    WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
                     x,
                     y,
-                    w.max(16) as c_int,
-                    h.max(16) as c_int,
+                    cw,
+                    ch,
                     parent_hwnd,
                     0,
                     0,
@@ -450,9 +479,18 @@ mod platform_host {
                 if hwnd == 0 {
                     return Err("CreateWindowExW failed".into());
                 }
+                (set_window_pos)(
+                    hwnd,
+                    HWND_TOP,
+                    x,
+                    y,
+                    cw,
+                    ch,
+                    SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_NOCOPYBITS,
+                );
                 Ok(Self {
                     hwnd,
-                    move_window: *move_window,
+                    set_window_pos: *set_window_pos,
                     destroy_window: *destroy_window,
                     _user32: user32,
                 })
@@ -469,7 +507,15 @@ mod platform_host {
 
         pub fn set_bounds(&self, x: i32, y: i32, w: u32, h: u32) {
             unsafe {
-                (self.move_window)(self.hwnd, x, y, w.max(16) as c_int, h.max(16) as c_int, 1);
+                (self.set_window_pos)(
+                    self.hwnd,
+                    HWND_TOP,
+                    x,
+                    y,
+                    w.max(16) as c_int,
+                    h.max(16) as c_int,
+                    SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_NOCOPYBITS,
+                );
             }
         }
     }
@@ -540,6 +586,8 @@ unsafe impl Send for ActiveSession {}
 pub struct EmbeddedPlayer {
     session: Arc<Mutex<Option<ActiveSession>>>,
     party_locked: Arc<AtomicBool>,
+    #[cfg(target_os = "windows")]
+    last_controls_json: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -555,11 +603,78 @@ impl EmbeddedPlayer {
         Self {
             session: Arc::new(Mutex::new(None)),
             party_locked: Arc::new(AtomicBool::new(false)),
+            #[cfg(target_os = "windows")]
+            last_controls_json: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn set_party_locked(&self, locked: bool) {
         self.party_locked.store(locked, Ordering::Relaxed);
+    }
+
+    pub fn handle_ui_action(&self, ev_type: &str, val: f64) {
+        if ev_type == "controlsReady" {
+            #[cfg(target_os = "windows")]
+            if let Some(json) = self
+                .last_controls_json
+                .lock()
+                .ok()
+                .and_then(|g| g.clone())
+                && let Ok(guard) = self.session.lock()
+                && let Some(sess) = guard.as_ref()
+                && let Some(ref win_ov) = sess.win_overlay
+            {
+                let script = format!("window.playerControls&&window.playerControls({json})");
+                let _ = win_ov.eval(&script);
+            }
+            return;
+        }
+        let blocked = self.party_locked.load(Ordering::Relaxed)
+            && matches!(
+                ev_type,
+                "setPlaybackState"
+                    | "setPlaybackStateQuiet"
+                    | "toggle"
+                    | "keyboardToggle"
+                    | "scrubFinish"
+                    | "seekBack"
+                    | "seekForward"
+                    | "setPlaybackSpeed"
+            );
+        if blocked {
+            return;
+        }
+        if let Ok(guard) = self.session.lock()
+            && let Some(sess) = guard.as_ref()
+        {
+            handle_low_latency_mpv_action(
+                &sess.api,
+                sess.handle,
+                &sess.ended_flag,
+                ev_type,
+                val,
+            );
+        }
+    }
+
+    pub fn sync_windows_overlay_bounds(&self, window: &WebviewWindow) {
+        #[cfg(target_os = "windows")]
+        {
+            let guard = self.session.lock().expect("player mutex");
+            if let Some(sess) = guard.as_ref()
+                && let Some(ref win_ov) = sess.win_overlay
+            {
+                if window.is_minimized().unwrap_or(false) {
+                    let _ = win_ov.hide();
+                } else if let (Ok(pos), Ok(size)) = (window.inner_position(), window.inner_size()) {
+                    let _ = win_ov.set_position(pos);
+                    let _ = win_ov.set_size(size);
+                    let _ = win_ov.show();
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = window;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -664,12 +779,25 @@ impl EmbeddedPlayer {
         let has_overlay = overlay_handle.is_some();
 
         #[cfg(target_os = "windows")]
-        let win_overlay = create_windows_overlay(&app, window, &controls_url).ok();
+        let win_overlay = match create_windows_overlay(&app, window) {
+            Ok(ov) => Some(ov),
+            Err(err) => {
+                tracing::error!("Windows player overlay unavailable: {err}");
+                eprintln!("Windows player overlay unavailable: {err}");
+                None
+            }
+        };
         #[cfg(target_os = "windows")]
-        if let (Some(win_ov), Some(init_json)) = (&win_overlay, &initial_controls_json) {
-            let script = format!("window.playerControls&&window.playerControls({init_json})");
-            let _ = win_ov.eval(&script);
+        {
+            *self.last_controls_json.lock().expect("controls mutex") =
+                initial_controls_json.clone();
+            if let (Some(win_ov), Some(init_json)) = (&win_overlay, &initial_controls_json) {
+                let script = format!("window.playerControls&&window.playerControls({init_json})");
+                let _ = win_ov.eval(&script);
+            }
         }
+        #[cfg(not(target_os = "linux"))]
+        let _ = &controls_url;
         #[cfg(not(target_os = "linux"))]
         let _ = &initial_controls_json;
         #[cfg(target_os = "windows")]
@@ -794,6 +922,10 @@ impl EmbeddedPlayer {
     }
 
     pub fn push_controls_json(&self, controls_json: String) {
+        #[cfg(target_os = "windows")]
+        {
+            *self.last_controls_json.lock().expect("controls mutex") = Some(controls_json.clone());
+        }
         let guard = self.session.lock().expect("player mutex");
         let Some(sess) = guard.as_ref() else {
             return;
@@ -1034,9 +1166,12 @@ impl EmbeddedPlayer {
             #[cfg(not(target_os = "linux"))]
             {
                 #[cfg(target_os = "windows")]
-                if let Some(win_ov) = sess.win_overlay.take() {
-                    let _ = win_ov.hide();
-                    let _ = win_ov.close();
+                {
+                    *self.last_controls_json.lock().expect("controls mutex") = None;
+                    if let Some(win_ov) = sess.win_overlay.take() {
+                        let _ = win_ov.eval("window.playerControls&&window.playerControls({closeModalsToken:Date.now()})");
+                        let _ = win_ov.hide();
+                    }
                 }
                 unsafe {
                     (sess.api.wakeup)(sess.handle);
@@ -1147,41 +1282,55 @@ fn apply_resize_mode(api: &MpvApi, handle: *mut c_void, mode: usize) -> Result<(
 fn create_windows_overlay(
     app: &AppHandle,
     parent: &WebviewWindow,
-    controls_url: &str,
 ) -> Result<WebviewWindow, String> {
+    use std::path::PathBuf;
     use tauri::{WebviewUrl, WebviewWindowBuilder};
-    if let Some(existing) = app.get_webview_window("player-overlay") {
-        let _ = existing.show();
-        return Ok(existing);
-    }
     let pos = parent.inner_position().map_err(|e| e.to_string())?;
     let size = parent.inner_size().map_err(|e| e.to_string())?;
-    let parsed_url = controls_url
-        .parse()
-        .map_err(|e: url::ParseError| e.to_string())?;
+    if let Some(existing) = app.get_webview_window("player-overlay") {
+        let _ = existing.set_position(pos);
+        let _ = existing.set_size(size);
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(existing);
+    }
 
     let init_script = r#"
-      window.chrome = window.chrome || {};
-      window.chrome.webview = {
-        postMessage: function(msg) {
-          if (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {
-            window.__TAURI_INTERNALS__.invoke('player_ui_message', { eventType: msg.type || '', value: Number(msg.value) || 0 });
+      window.__NUVIO_POST__ = function(msg) {
+        try {
+          if (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === 'function') {
+            window.__TAURI_INTERNALS__.invoke('player_ui_message', {
+              eventType: String((msg && msg.type) || ''),
+              value: Number(msg && msg.value) || 0
+            }).catch(function(){});
           }
-        }
+        } catch (_) {}
       };
+      document.addEventListener('DOMContentLoaded', function() {
+        var s = document.createElement('style');
+        s.textContent =
+          '@font-face{font-family:"Nuvio JetBrains Sans";src:url("/assets/jetbrains_sans_regular.ttf") format("truetype");font-weight:400;font-style:normal;font-display:block;}' +
+          '@font-face{font-family:"Nuvio JetBrains Sans";src:url("/assets/jetbrains_sans_semibold.ttf") format("truetype");font-weight:600;font-style:normal;font-display:block;}' +
+          '@font-face{font-family:"Nuvio JetBrains Sans";src:url("/assets/jetbrains_sans_bold.ttf") format("truetype");font-weight:700;font-style:normal;font-display:block;}';
+        (document.head || document.documentElement).appendChild(s);
+      });
     "#;
 
-    let ov = WebviewWindowBuilder::new(app, "player-overlay", WebviewUrl::External(parsed_url))
-        .title("Nuvio Player Controls")
-        .transparent(true)
-        .decorations(false)
-        .shadow(false)
-        .skip_taskbar(true)
-        .parent(parent)
-        .map_err(|e| e.to_string())?
-        .initialization_script(init_script)
-        .build()
-        .map_err(|e| e.to_string())?;
+    let ov = WebviewWindowBuilder::new(
+        app,
+        "player-overlay",
+        WebviewUrl::App(PathBuf::from("player-ui/controls.html")),
+    )
+    .title("Nuvio Player Controls")
+    .transparent(true)
+    .decorations(false)
+    .shadow(false)
+    .skip_taskbar(true)
+    .parent(parent)
+    .map_err(|e| e.to_string())?
+    .initialization_script(init_script)
+    .build()
+    .map_err(|e| e.to_string())?;
     let _ = ov.set_position(pos);
     let _ = ov.set_size(size);
     let _ = ov.set_focus();
@@ -1234,12 +1383,22 @@ fn create_and_init_mpv(
     ensure_c_lc_numeric();
 
     #[cfg(target_os = "linux")]
-    let attempts: &[(&str, &str)] = &[("x11egl", "auto"), ("x11vk", "nvdec-copy"), ("x11", "auto")];
-    #[cfg(not(target_os = "linux"))]
-    let attempts: &[(&str, &str)] = &[("auto", "auto")];
+    let attempts: &[(&str, &str, &str)] = &[
+        ("gpu", "x11egl", "auto"),
+        ("gpu", "x11vk", "nvdec-copy"),
+        ("gpu", "x11", "auto"),
+    ];
+    #[cfg(target_os = "windows")]
+    let attempts: &[(&str, &str, &str)] = &[
+        ("gpu-next,gpu,", "auto", "auto"),
+        ("gpu", "d3d11", "d3d11va"),
+        ("gpu", "win", "auto"),
+    ];
+    #[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
+    let attempts: &[(&str, &str, &str)] = &[("gpu", "auto", "auto")];
 
     let mut last_err = 0;
-    for (gpu_ctx, hwdec) in attempts {
+    for (vo, gpu_ctx, hwdec) in attempts {
         let handle = unsafe { (api.create)() };
         if handle.is_null() {
             return Err("mpv_create returned null".into());
@@ -1253,7 +1412,7 @@ fn create_and_init_mpv(
         let _ = mpv_set_opt(api, handle, "cursor-autohide", "no");
         let _ = mpv_set_opt(api, handle, "keep-open", "yes");
         let _ = mpv_set_opt(api, handle, "idle", "yes");
-        let _ = mpv_set_opt(api, handle, "vo", "gpu");
+        let _ = mpv_set_opt(api, handle, "vo", vo);
         let _ = mpv_set_opt(api, handle, "force-window", "immediate");
         let _ = mpv_set_opt(api, handle, "gpu-context", gpu_ctx);
         let _ = mpv_set_opt(api, handle, "hwdec", hwdec);

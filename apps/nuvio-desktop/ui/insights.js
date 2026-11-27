@@ -73,6 +73,63 @@ function formatWatchTimeLabel(totalMs) {
   return remHours > 0 ? `${days} d ${remHours} h` : `${days} d`;
 }
 
+// Mobile parity: runtime strings such as "2h 15m", "135 min" or "135".
+function parseRuntimeMinutes(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return 0;
+  const hours = raw.match(/(\d+)\s*h/i);
+  const mins = raw.match(/(\d+)\s*m/i);
+  if (hours || mins) return (hours ? Number(hours[1]) * 60 : 0) + (mins ? Number(mins[1]) : 0);
+  const digits = raw.match(/^(\d+)$/);
+  return digits ? Number(digits[1]) : 0;
+}
+
+// NuvioMobile-Enhanced fallbacks (ProfileInsightsFallbackMovieMinutes/EpisodeMinutes).
+const FALLBACK_MOVIE_MINUTES = 115;
+const FALLBACK_EPISODE_MINUTES = 42;
+
+function profileFallbackDurationMs(kind, isEpisode) {
+  if (kind === 'movie' && !isEpisode) return FALLBACK_MOVIE_MINUTES * 60000;
+  if (kind === 'series' && isEpisode) return FALLBACK_EPISODE_MINUTES * 60000;
+  return 0;
+}
+
+function progressPercentOf(entry) {
+  const pct = Number(entry.progress_percent ?? entry.progressPercent);
+  return Number.isFinite(pct) ? Math.min(100, Math.max(0, pct)) : null;
+}
+
+// WatchProgressEntry.progressFraction: explicit percent first, then position/duration.
+function progressFractionOf(entry) {
+  const pct = progressPercentOf(entry);
+  if (pct !== null) return Math.min(1, pct / 100);
+  const dur = Math.max(0, Number(entry.duration) || 0);
+  const pos = Math.max(0, Number(entry.position) || 0);
+  return dur > 0 ? Math.min(1, pos / dur) : 0;
+}
+
+// WatchProgressEntry.isEffectivelyCompleted: 90% by explicit percent or position/duration.
+function isProgressCompleted(entry) {
+  const pct = progressPercentOf(entry);
+  if (pct !== null && pct >= 90) return true;
+  const dur = Math.max(0, Number(entry.duration) || 0);
+  const pos = Math.max(0, Number(entry.position) || 0);
+  return dur > 0 && pos / dur >= 0.90;
+}
+
+// Mobile parity: effective duration = real duration, else the 115/42 fallback.
+function trackedProgressMs(entry, kind, isEpisode) {
+  const dur = Math.max(0, Number(entry.duration) || 0);
+  const effective = dur > 0 ? dur : profileFallbackDurationMs(kind, isEpisode);
+  const pos = Math.max(0, Number(entry.position) || 0);
+  if (effective <= 0) return pos;
+  if (isProgressCompleted(entry)) return effective;
+  if (pos > 0) return Math.min(pos, effective);
+  const pct = progressPercentOf(entry);
+  if (pct === null || pct <= 0) return 0;
+  return Math.min(effective, Math.round((effective * pct) / 100));
+}
+
 function computeProfileInsights(raw) {
   const activeProfile = (authState?.profiles || []).find((p) => p.profile_index === authState?.active_profile_index)
     || (authState?.profiles || [])[0]
@@ -109,12 +166,16 @@ function computeProfileInsights(raw) {
   const movieCount = library.filter((it) => it.type === 'movie').length;
   const seriesCount = library.length - movieCount;
 
-  // Match NuvioMobile-Enhanced stats: deduplicated continue watching (<90%), watched movies, completed & ongoing series, and watch time.
+  // Match NuvioMobile-Enhanced stats: deduplicated continue watching (<90%), watched movies, completed & ongoing series,
+  // and watch time from real durations merged with watched refs (fallback 115/42 when the length is unknown).
   const seenProgressKeys = new Set();
+  const continueGroupKeys = new Set();
   const continueEntries = [];
-  const durationByActivityKey = new Map();
-  let completedProgressMovies = new Set();
+  const progressDurationByKey = new Map();
+  const watchedDurationByKey = new Map();
   const engagedSeriesEpisodes = new Map();
+  const completedProgressMovies = new Set();
+  const activityKey = (kind, cid, season, episode) => `${kind}:${cid}:${season ?? -1}:${episode ?? -1}`;
 
   for (const p of progress) {
     const cid = String(p.content_id || '').trim();
@@ -124,23 +185,24 @@ function computeProfileInsights(raw) {
     if (seenProgressKeys.has(dedupeKey)) continue;
     seenProgressKeys.add(dedupeKey);
 
-    const pos = Math.max(0, Number(p.position) || 0);
-    const dur = Math.max(0, Number(p.duration) || 0);
-    const ratio = dur > 0 ? pos / dur : 0;
-    const effectivelyDone = ratio >= 0.85;
-    if (!effectivelyDone && pos > 0) {
-      continueEntries.push(p);
+    const fraction = progressFractionOf(p);
+    const effectivelyDone = isProgressCompleted(p);
+    // Mobile parity: resume list keeps entries from 2% up, one per series.
+    if (!effectivelyDone && fraction >= 0.02) {
+      const groupKey = kind === 'series' ? `series:${cid}` : `movie:${cid}:${p.video_id || cid}`;
+      if (!continueGroupKeys.has(groupKey)) {
+        continueGroupKeys.add(groupKey);
+        continueEntries.push(p);
+      }
     }
 
     const sea = p.season ?? null;
     const ep = p.episode ?? null;
     if (kind === 'movie' || (kind === 'series' && sea != null && ep != null)) {
-      const ak = `${kind}:${cid}:${sea ?? -1}:${ep ?? -1}`;
-      const fallbackDur = (kind === 'movie' ? 115 : 42) * 60000;
-      const effDur = dur > 0 ? dur : fallbackDur;
-      const tracked = effectivelyDone ? effDur : Math.min(pos, effDur);
-      if (tracked > (durationByActivityKey.get(ak) || 0)) {
-        durationByActivityKey.set(ak, tracked);
+      const ak = activityKey(kind, cid, sea, ep);
+      const tracked = trackedProgressMs(p, kind, sea != null && ep != null);
+      if (tracked > 0 && tracked > (progressDurationByKey.get(ak) || 0)) {
+        progressDurationByKey.set(ak, tracked);
       }
       if (kind === 'movie' && effectivelyDone) completedProgressMovies.add(cid);
       if (kind === 'series' && sea != null && ep != null && tracked > 0) {
@@ -153,6 +215,7 @@ function computeProfileInsights(raw) {
   const watchedMovieIds = new Set();
   const completedSeriesIds = new Set();
   const distinctEpisodes = new Set();
+  const watchedActivityKeys = new Set();
 
   for (const w of watched) {
     const cid = String(w.content_id || '').trim();
@@ -161,21 +224,22 @@ function computeProfileInsights(raw) {
     if (!cid || !kind) continue;
     const sea = w.season ?? null;
     const ep = w.episode ?? null;
+    // Mobile parity: one watched ref per activity, duration from the cached runtime otherwise the fallback.
+    const ak0 = activityKey(kind, cid, sea, ep);
+    if (watchedActivityKeys.has(ak0)) continue;
+    watchedActivityKeys.add(ak0);
     if (kind === 'movie' && sea == null && ep == null) {
       watchedMovieIds.add(cid);
-      const ak = `movie:${cid}:-1:-1`;
-      const est = 115 * 60000;
-      if (est > (durationByActivityKey.get(ak) || 0)) durationByActivityKey.set(ak, est);
+      const runtimeMin = parseRuntimeMinutes(insightsMetaCache.get(cid)?.runtime) || FALLBACK_MOVIE_MINUTES;
+      const ms = Math.round(runtimeMin * 60000);
+      if (ms > (watchedDurationByKey.get(ak0) || 0)) watchedDurationByKey.set(ak0, ms);
     } else if (kind === 'series') {
       if (sea != null && ep != null) {
         distinctEpisodes.add(`${cid}:${sea}:${ep}`);
         if (!engagedSeriesEpisodes.has(cid)) engagedSeriesEpisodes.set(cid, new Set());
         engagedSeriesEpisodes.get(cid).add(`${sea}:${ep}`);
-        const lib = libraryById.get(cid);
-        const isAnime = (lib?.genres || []).some((g) => /anim/i.test(g));
-        const ak = `series:${cid}:${sea}:${ep}`;
-        const est = (isAnime ? 24 : 42) * 60000;
-        if (est > (durationByActivityKey.get(ak) || 0)) durationByActivityKey.set(ak, est);
+        const ms = FALLBACK_EPISODE_MINUTES * 60000;
+        if (ms > (watchedDurationByKey.get(ak0) || 0)) watchedDurationByKey.set(ak0, ms);
       } else if (rawType !== 'tv') {
         completedSeriesIds.add(cid);
       }
@@ -183,17 +247,21 @@ function computeProfileInsights(raw) {
   }
 
   const ongoingSeriesCount = [...engagedSeriesEpisodes.keys()].filter((id) => !completedSeriesIds.has(id)).length;
-  const totalWatchTimeMs = [...durationByActivityKey.values()].reduce((acc, v) => acc + v, 0);
+  // Same merge as profileWatchTimeSplit: one duration per activity key, the larger wins.
+  const durationByKey = new Map(progressDurationByKey);
+  for (const [key, ms] of watchedDurationByKey) {
+    if (ms > (durationByKey.get(key) || 0)) durationByKey.set(key, ms);
+  }
+  const totalWatchTimeMs = [...durationByKey.values()].reduce((acc, v) => acc + v, 0);
 
-  // Movie vs Series balance uses engaged watched titles (matching ProfileInsightsSettingsPage.kt) with library fallback
-  const engagedMovieCount = new Set([...watchedMovieIds, ...completedProgressMovies]).size;
-  const engagedSeriesCount = new Set([
+  // Movie vs Series balance matches buildProfileTypeBalance: unique watched movies vs engaged series
+  // (completed titles or series with at least 2 episodes watched). Library items are not counted here.
+  const engagedSeriesIds = new Set([
     ...completedSeriesIds,
     ...[...engagedSeriesEpisodes.entries()].filter(([, eps]) => eps.size >= 2).map(([id]) => id),
-  ]).size;
-  const balanceTotal = engagedMovieCount + engagedSeriesCount;
-  const balanceMovies = balanceTotal > 0 ? engagedMovieCount : movieCount;
-  const balanceSeries = balanceTotal > 0 ? engagedSeriesCount : seriesCount;
+  ]);
+  const balanceMovies = new Set([...watchedMovieIds, ...completedProgressMovies]).size;
+  const balanceSeries = engagedSeriesIds.size;
   const balanceSum = balanceMovies + balanceSeries;
   const moviePct = balanceSum ? Math.round((balanceMovies / balanceSum) * 100) : 50;
   const seriesPct = balanceSum ? 100 - moviePct : 50;
@@ -316,9 +384,7 @@ function computeProfileInsights(raw) {
 
   const smartResumeEntry = [...continueEntries]
     .filter((p) => {
-      const dur = Math.max(1, Number(p.duration) || 0);
-      const pos = Math.max(0, Number(p.position) || 0);
-      const frac = dur > 0 ? pos / dur : 0;
+      const frac = progressFractionOf(p);
       return frac >= 0.05 && frac <= 0.92;
     })
     .sort((a, b) => (Number(b.last_watched) || 0) - (Number(a.last_watched) || 0))[0] || null;
@@ -432,8 +498,8 @@ function renderInsightsDashboard() {
           <button class="library-source-chip ${insightsUi.subTab === 'overview' ? 'active' : ''}" data-insights-sub="overview" type="button">Visão Geral</button>
           <button class="library-source-chip ${insightsUi.subTab === 'taste' ? 'active' : ''}" data-insights-sub="taste" type="button">Perfil de Gosto</button>
         </div>
-        <button class="nv-mini-btn" id="btn-insights-refresh" type="button">${insightsUi.loading ? 'Atualizando…' : 'Atualizar'}</button>
-        <button class="nv-mini-btn" id="btn-insights-library" type="button">Abrir Biblioteca</button>
+        <button class="btn-ghost nv-mini-btn" id="btn-insights-refresh" type="button">${insightsUi.loading ? 'Atualizando…' : 'Atualizar'}</button>
+        <button class="btn-accent nv-mini-btn" id="btn-insights-library" type="button">Abrir Biblioteca</button>
       </div>
     </div>
 
@@ -460,8 +526,8 @@ function renderInsightsDashboard() {
         </div>
         <div class="insights-mix-box">
           <div class="insights-mix-head">
-            <span>Filmes <strong>${m.balanceMovies}</strong> (${m.moviePct}%)</span>
-            <span>Séries <strong>${m.balanceSeries}</strong> (${m.seriesPct}%)</span>
+            <span title="Base: ${m.balanceMovies} filmes e ${m.balanceSeries} séries com atividade">Filmes <strong>${m.moviePct}%</strong></span>
+            <span title="Base: ${m.balanceMovies} filmes e ${m.balanceSeries} séries com atividade">Séries <strong>${m.seriesPct}%</strong></span>
           </div>
           <div class="insights-mix-bar">
             <div class="insights-mix-movies" style="width:${m.moviePct}%"></div>

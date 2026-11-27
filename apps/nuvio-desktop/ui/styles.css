@@ -421,10 +421,15 @@ html, body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
+  overflow-y: auto;
+  padding: 40px 24px;
   background: radial-gradient(circle at top, #1A1528 0%, var(--bg) 60%);
   gap: 28px;
 }
+/* Center the picker when it fits, but allow it to scroll instead of clipping. */
+.profiles-wordmark { margin-top: auto; }
+.profiles-actions { margin-bottom: auto; }
 .profiles-wordmark { height: 34px; opacity: 0.9; }
 .profiles-heading { margin: 0; font-size: 32px; font-weight: 600; }
 .profiles-grid {
@@ -549,32 +554,56 @@ html, body {
 }
 .mini-avatar img { width: 100%; height: 100%; object-fit: cover; }
 
+/* Floating quick-switch popup (mirrors NuvioMobile-Enhanced ProfileSwitcherTab). */
 .profile-switcher-stack {
-  position: relative;
-  z-index: 1;
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 500;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin-top: 6px;
-  padding: 6px;
+  gap: 2px;
+  min-width: 232px;
+  max-width: 300px;
+  max-height: min(60vh, 420px);
+  overflow-y: auto;
+  padding: 8px;
   background: var(--bg-elevated);
-  border-radius: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+}
+.switcher-title {
+  padding: 8px 10px 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
 }
 .switcher-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 6px;
-  border-radius: 10px;
+  gap: 12px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 12px;
   background: transparent;
-  border: none;
   color: var(--text-primary);
   cursor: pointer;
-  font-size: 13px;
+  font: 500 14px/1.2 "JetBrains Sans", sans-serif;
+  text-align: left;
   white-space: nowrap;
 }
-.switcher-row:hover { background: rgba(255, 255, 255, 0.06); }
+.switcher-row:hover { background: rgba(255, 255, 255, 0.07); }
+.switcher-row.active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.switcher-row .mini-avatar { width: 36px; height: 36px; flex: 0 0 36px; }
+.switcher-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.switcher-check { flex: 0 0 auto; color: var(--accent); font-weight: 700; }
 
 .sidebar-nav {
   position: absolute;
@@ -997,7 +1026,11 @@ html, body {
   font-size: 13px;
   cursor: pointer;
   font-family: inherit;
+  transition: filter 150ms ease, transform 120ms ease;
 }
+.btn-accent:hover { filter: brightness(1.1); }
+.btn-accent:active { filter: brightness(0.94); transform: scale(0.98); }
+.btn-accent:disabled { opacity: 0.55; cursor: default; filter: none; transform: none; }
 .btn-ghost {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text-primary);
@@ -1008,7 +1041,36 @@ html, body {
   font-size: 13px;
   cursor: pointer;
   font-family: inherit;
+  transition: background-color 150ms ease, border-color 150ms ease, transform 120ms ease;
 }
+.btn-ghost:hover { background: rgba(255, 255, 255, 0.14); border-color: rgba(255, 255, 255, 0.2); }
+.btn-ghost:active { transform: scale(0.98); }
+.btn-ghost:disabled { opacity: 0.5; cursor: default; transform: none; }
+
+/* Compact pill action used in top bars and setting rows (same Nuvio language as btn-ghost). */
+.nv-mini-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+  font: 600 12px/1.2 "JetBrains Sans", sans-serif;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 150ms ease, border-color 150ms ease, transform 120ms ease;
+}
+.nv-mini-btn:hover { background: rgba(255, 255, 255, 0.15); border-color: rgba(255, 255, 255, 0.24); }
+.nv-mini-btn:active { background: rgba(255, 255, 255, 0.2); transform: scale(0.97); }
+.nv-mini-btn:disabled { opacity: 0.5; cursor: default; transform: none; }
+.btn-accent.nv-mini-btn { background: var(--accent); border-color: transparent; color: var(--on-accent); }
+.btn-accent.nv-mini-btn:hover { background: var(--accent); filter: brightness(1.1); }
+.btn-accent:focus-visible,
+.btn-ghost:focus-visible,
+.nv-mini-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .btn-danger {
   background: rgba(229, 57, 53, 0.16);
   color: #FF8A80;
@@ -1137,6 +1199,8 @@ input:focus, select:focus, textarea:focus { border-color: var(--focus-ring); }
   flex: 0 0 32px;
   height: 32px;
   border-radius: 8px;
+  font-size: 16px;
+  line-height: 1;
 }
 .settings-cat-icon svg { width: 24px; height: 24px; }
 .settings-cat-btn:hover, .settings-cat-btn.active {
@@ -2210,6 +2274,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--focus-ring); }
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  max-width: 220px;
   background: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 999px;
@@ -2219,6 +2284,13 @@ input:focus, select:focus, textarea:focus { border-color: var(--focus-ring); }
   font-weight: 600;
   cursor: pointer;
   font-family: inherit;
+}
+.topnav-profile-btn .mini-avatar { flex: 0 0 32px; }
+.topnav-profile-btn span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* === POSTER WATCHED BADGE & VARIANT SIZES === */
@@ -2866,6 +2938,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--focus-ring); }
 .service-choice select option { background: var(--bg-elevated); color: var(--text-primary); }
 .service-icon { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 12px; background: color-mix(in srgb, var(--accent) 12%, transparent); flex: none; }
 .service-icon img { width: 28px; height: 28px; object-fit: contain; }
+.nv-link-icon { font-size: 19px; line-height: 1; }
 .service-providers summary { list-style: none; }
 .service-providers summary::-webkit-details-marker { display: none; }
 .service-providers summary:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
@@ -3208,7 +3281,6 @@ select.nv-value option { background: var(--bg-elevated); color: var(--text-prima
 .nv-addon-footer .addon-icon-btn svg { width: 16px; height: 16px; }
 .nv-addon-side { display: flex; align-items: center; gap: 12px; flex: none; }
 .nv-addon-row > .nuvio-switch { align-self: center; }
-.nv-mini-btn { padding: 7px 14px; font-size: 12px; }
 .nv-diagnostic {
   margin: 0;
   min-width: 0;
@@ -4095,3 +4167,61 @@ select.nv-value option { background: var(--bg-elevated); color: var(--text-prima
   .insights-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .insights-bento-2col { grid-template-columns: 1fr; }
 }
+
+/* Sessão em grupo: página de entrada por código */
+#view-party { background: var(--bg); overflow-y: auto; }
+.party-page { min-height: 100%; display: flex; flex-direction: column; padding: 26px 30px 56px; }
+.party-page-head { display: flex; align-items: center; gap: 18px; }
+.party-page-head h1 { margin: 0; font-size: 32px; font-weight: 700; letter-spacing: -0.6px; color: var(--text-primary); }
+.party-page-body { flex: 1; display: flex; flex-direction: column; align-items: center; text-align: center; padding-top: 64px; }
+.party-page-avatars { display: flex; align-items: center; margin-bottom: 28px; }
+.party-page-avatar {
+  display: grid; place-items: center;
+  width: 72px; height: 72px; border-radius: 50%;
+  font-size: 28px; font-weight: 600; color: var(--text-muted);
+  border: 2px dashed rgba(255, 255, 255, 0.24);
+  margin-left: -12px;
+}
+.party-page-avatar:first-child { margin-left: 0; }
+.party-page-avatar.filled { border: none; background: var(--accent); color: var(--on-accent); }
+.party-page-body h2 { margin: 0 0 10px; font-size: 28px; font-weight: 700; color: var(--text-primary); }
+.party-page-sub { margin: 0 0 34px; font-size: 15px; color: var(--text-secondary); }
+.party-code-boxes { display: flex; gap: 20px; margin-bottom: 36px; }
+.party-code-box {
+  width: 54px; height: 48px; padding: 0 0 6px;
+  background: transparent; border: none; border-bottom: 2px solid rgba(255, 255, 255, 0.22);
+  color: var(--text-primary); font-size: 26px; font-weight: 600;
+  text-align: center; text-transform: uppercase; outline: none;
+}
+.party-code-box:focus { border-bottom-color: var(--focus-ring); }
+.party-enter-btn {
+  width: min(520px, 100%); height: 54px; border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08); background: var(--bg-card);
+  color: var(--text-secondary); font-size: 16px; font-weight: 600;
+  cursor: pointer; transition: background 150ms, color 150ms, border-color 150ms;
+}
+.party-enter-btn:disabled { opacity: 0.75; cursor: default; }
+.party-enter-btn:not(:disabled) { background: var(--accent); color: var(--on-accent); border-color: transparent; }
+.party-enter-btn:not(:disabled):hover { background: var(--accent-variant); }
+.party-page-error { min-height: 18px; margin: 12px 0 0; font-size: 13px; color: #ff8f8f; }
+.party-page-note { max-width: 470px; margin: 18px auto 0; font-size: 13px; line-height: 1.55; color: var(--text-muted); }
+.party-page-hint { margin: 18px 0 0; font-size: 13px; color: var(--text-secondary); }
+.party-page-active { margin-top: 34px; width: min(560px, 100%); text-align: left; }
+.party-page-active .nv-row { padding: 14px 22px; }
+.party-page-active .nv-title { font-size: 16px; }
+@media (max-width: 720px) {
+  .party-code-boxes { gap: 10px; }
+  .party-code-box { width: 42px; font-size: 22px; }
+  .party-page-body { padding-top: 40px; }
+}
+
+/* Integrações → Serviços conectados (sub-página) */
+.nv-title-with-back { display: flex; align-items: center; gap: 14px; }
+.nv-link-row { width: 100%; background: transparent; border: 0; color: inherit; font: inherit; text-align: left; }
+.nv-sheet > .nv-link-row { border-top: 1px solid rgb(255 255 255 / 6%); }
+.nv-link-row:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+
+/* Ícones em preto e branco (padrão monocromático dos Ajustes) */
+.settings-cat-icon,
+.nv-link-icon,
+.service-icon img { filter: grayscale(1); }

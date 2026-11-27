@@ -534,6 +534,10 @@ const chromeInteractionSelector = [
 ].join(",");
 
 const send = (type, value = 0) => {
+  if (typeof window.__NUVIO_POST__ === "function") {
+    window.__NUVIO_POST__({ type, value });
+    return;
+  }
   const bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.player;
   if (bridge) {
     bridge.postMessage({ type, value });

@@ -3289,7 +3289,7 @@ dependencies = [
 
 [[package]]
 name = "nuvio-core"
-version = "0.2.0"
+version = "0.0.3"
 dependencies = [
  "nuvio-integrations",
  "nuvio-p2p",
@@ -3304,7 +3304,7 @@ dependencies = [
 
 [[package]]
 name = "nuvio-desktop"
-version = "0.2.0"
+version = "0.0.3"
 dependencies = [
  "libloading 0.9.1",
  "nuvio-core",
@@ -3323,7 +3323,7 @@ dependencies = [
 
 [[package]]
 name = "nuvio-integrations"
-version = "0.2.0"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "nuvio-storage",
@@ -3339,7 +3339,7 @@ dependencies = [
 
 [[package]]
 name = "nuvio-p2p"
-version = "0.2.0"
+version = "0.0.3"
 dependencies = [
  "libloading 0.9.1",
  "librqbit",
@@ -3350,7 +3350,7 @@ dependencies = [
 
 [[package]]
 name = "nuvio-plugins"
-version = "0.2.0"
+version = "0.0.3"
 dependencies = [
  "base64 0.22.1",
  "hex 0.4.3",
@@ -3368,7 +3368,7 @@ dependencies = [
 
 [[package]]
 name = "nuvio-storage"
-version = "0.2.0"
+version = "0.0.3"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -3391,7 +3391,7 @@ dependencies = [
 
 [[package]]
 name = "nuvio-supabase"
-version = "0.2.0"
+version = "0.0.3"
 dependencies = [
  "futures-util",
  "nuvio-storage",

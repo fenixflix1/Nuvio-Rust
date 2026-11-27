@@ -56,15 +56,32 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build Windows release executable
         run: cargo build --release -p nuvio-desktop
+      - name: Fetch Windows libmpv runtime
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist-win | Out-Null
+          $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest" -Headers @{ "User-Agent" = "nuvio-desktop-ci" }
+          $asset = $rel.assets | Where-Object { $_.name -match '^mpv-dev-x86_64-\d+.*\.7z$' -and $_.name -notmatch 'v3' } | Select-Object -First 1
+          if (-not $asset) {
+            $asset = $rel.assets | Where-Object { $_.name -match '^mpv-dev-x86_64-.*\.7z$' } | Select-Object -First 1
+          }
+          if (-not $asset) { throw "Could not find mpv-dev-x86_64 archive in shinchiro/mpv-winbuild-cmake releases" }
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "$env:TEMP\mpv-dev.7z"
+          7z e "$env:TEMP\mpv-dev.7z" "libmpv-2.dll" -o"dist-win" -r -y
+          if (-not (Test-Path "dist-win\libmpv-2.dll")) { throw "libmpv-2.dll extraction failed" }
       - name: Prepare Windows artifact
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist-win | Out-Null
           Copy-Item target/release/nuvio-desktop.exe dist-win/NuvioDesktop-Rust.exe
+          Compress-Archive -Path dist-win/NuvioDesktop-Rust.exe, dist-win/libmpv-2.dll -DestinationPath dist-win/NuvioDesktop-Rust-Windows-x86_64.zip -Force
       - uses: actions/upload-artifact@v4
         with:
           name: NuvioDesktop-Rust-Windows-Exe
-          path: dist-win/NuvioDesktop-Rust.exe
+          path: |
+            dist-win/NuvioDesktop-Rust.exe
+            dist-win/libmpv-2.dll
+            dist-win/NuvioDesktop-Rust-Windows-x86_64.zip
 
   release:
     needs: [build-linux, build-windows]
@@ -86,3 +103,5 @@ jobs:
           files: |
             release-assets/NuvioDesktop-Rust-x86_64.AppImage
             release-assets/NuvioDesktop-Rust.exe
+            release-assets/libmpv-2.dll
+            release-assets/NuvioDesktop-Rust-Windows-x86_64.zip

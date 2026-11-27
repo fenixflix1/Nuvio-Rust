@@ -400,6 +400,10 @@ function setTab(tab) {
 }
 
 function handleBackNavigation() {
+  if (document.getElementById('view-party')?.classList.contains('active')) {
+    showView('view-app');
+    return;
+  }
   if (!document.getElementById('poster-context-overlay').classList.contains('hidden')) {
     closeContextMenu();
     return;
@@ -646,7 +650,7 @@ function renderProfilePicker(profiles) {
   grid.innerHTML = profiles.map((p) => `
     <button class="profile-card" data-profile-index="${p.profile_index}">
       <div class="profile-avatar-lg" style="background:${esc(p.avatar_color_hex || '#1E88E5')}">
-        ${p.avatar_url ? `<img src="${esc(p.avatar_url)}" alt="" />` : esc((p.name || 'P').charAt(0).toUpperCase())}
+        ${p.avatar_url ? `<img src="${esc(p.avatar_url)}" alt="" onerror="this.remove()" />` : esc((p.name || 'P').charAt(0).toUpperCase())}
       </div>
       <span>${esc(p.name || `Perfil ${p.profile_index}`)}</span>
     </button>
@@ -704,7 +708,7 @@ function updateProfileUi() {
   const name = active?.name || 'Local';
   const color = active?.avatar_color_hex || 'var(--accent)';
   const avatarInner = active?.avatar_url
-    ? `<img src="${esc(active.avatar_url)}" alt="" />`
+    ? `<img src="${esc(active.avatar_url)}" alt="" onerror="this.remove()" />`
     : esc(name.charAt(0).toUpperCase());
 
   const sbAvatar = document.getElementById('sidebar-avatar');
@@ -718,30 +722,90 @@ function updateProfileUi() {
   document.getElementById('topnav-profile-name').textContent = name;
 
   const stack = document.getElementById('profile-switcher-stack');
-  stack.innerHTML = profiles.map((p) => `
-    <button class="switcher-row" data-switch-idx="${p.profile_index}">
-      <div class="mini-avatar" style="background:${esc(p.avatar_color_hex || '#1E88E5')}">
-        ${esc((p.name || 'P').charAt(0).toUpperCase())}
-      </div>
-      <span>${esc(p.name)}</span>
-    </button>
-  `).join('');
+  const activeIdx = authState?.active_profile_index;
+  stack.innerHTML = profiles.length
+    ? '<div class="switcher-title">Trocar perfil</div>' + profiles.map((p) => {
+      const isActive = p.profile_index === activeIdx;
+      const label = p.name || `Perfil ${p.profile_index}`;
+      const avatar = p.avatar_url
+        ? `<img src="${esc(p.avatar_url)}" alt="" onerror="this.remove()" />`
+        : esc(label.charAt(0).toUpperCase());
+      return `
+        <button class="switcher-row${isActive ? ' active' : ''}" data-switch-idx="${p.profile_index}" type="button">
+          <span class="mini-avatar" style="background:${esc(p.avatar_color_hex || '#1E88E5')}">${avatar}</span>
+          <span class="switcher-name">${esc(label)}</span>
+          ${isActive ? '<span class="switcher-check" aria-hidden="true">✓</span>' : ''}
+        </button>
+      `;
+    }).join('')
+    : '<div class="switcher-title">Nenhum perfil encontrado</div>';
   stack.querySelectorAll('[data-switch-idx]').forEach((btn) => {
     btn.addEventListener('click', () => {
+      stack.classList.add('hidden');
       switchToProfile(Number(btn.dataset.switchIdx), false);
     });
   });
 }
 
-document.getElementById('btn-sidebar-profile').addEventListener('click', () => {
-  document.getElementById('profile-switcher-stack').classList.toggle('hidden');
+function positionProfileSwitcher(anchor) {
+  const stack = document.getElementById('profile-switcher-stack');
+  const trigger = anchor || document.getElementById('btn-sidebar-profile');
+  if (!stack || !trigger) return;
+  const rect = trigger.getBoundingClientRect();
+  const margin = 10;
+  stack.classList.remove('hidden');
+  const width = stack.offsetWidth;
+  const height = stack.offsetHeight;
+  let left;
+  let top;
+  if (trigger.id === 'btn-topnav-profile') {
+    left = rect.right - width;
+    top = rect.bottom + 8;
+  } else {
+    left = rect.right + margin;
+    top = rect.top;
+  }
+  if (left + width > window.innerWidth - 12) left = Math.max(12, rect.left - width - margin);
+  left = Math.max(12, left);
+  if (top + height > window.innerHeight - 12) top = Math.max(12, window.innerHeight - height - 12);
+  stack.style.left = `${Math.round(left)}px`;
+  stack.style.top = `${Math.round(top)}px`;
+}
+
+function setProfileSwitcherOpen(open, anchor) {
+  const stack = document.getElementById('profile-switcher-stack');
+  if (!stack) return;
+  if (open) positionProfileSwitcher(anchor);
+  else stack.classList.add('hidden');
+}
+
+document.getElementById('btn-sidebar-profile').addEventListener('click', (event) => {
+  event.stopPropagation();
+  const stack = document.getElementById('profile-switcher-stack');
+  setProfileSwitcherOpen(stack.classList.contains('hidden'), event.currentTarget);
 });
 
-document.getElementById('btn-topnav-profile').addEventListener('click', () => {
-  if (authState?.profiles?.length) {
-    renderProfilePicker(authState.profiles);
-    showView('view-profiles');
-  }
+document.addEventListener('click', (event) => {
+  const stack = document.getElementById('profile-switcher-stack');
+  if (!stack || stack.classList.contains('hidden')) return;
+  if (stack.contains(event.target) || event.target.closest?.('#btn-sidebar-profile, #btn-topnav-profile')) return;
+  stack.classList.add('hidden');
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') document.getElementById('profile-switcher-stack')?.classList.add('hidden');
+});
+
+window.addEventListener('resize', () => {
+  document.getElementById('profile-switcher-stack')?.classList.add('hidden');
+});
+
+document.getElementById('btn-topnav-profile').addEventListener('click', (event) => {
+  event.stopPropagation();
+  if (!authState?.profiles?.length) return;
+  // Quick switch popup (like NuvioMobile-Enhanced's profile tab); the full
+  // picker stays available from Ajustes → Trocar perfil.
+  setProfileSwitcherOpen(true, event.currentTarget);
 });
 
 document.querySelectorAll('.sidebar-item, .topnav-item').forEach((btn) => {
@@ -989,9 +1053,14 @@ async function refreshContinueWatching() {
   wrap.innerHTML = '';
 
   if (simklUses('progress')) {
-    simklProgressCards().forEach((card, index) => cwItemsMap.set(index,card));
-    renderContinueWatchingRow();
-    return;
+    const cards = simklProgressCards();
+    // Simkl escolhido como fonte, mas sem snapshot sincronizado (conta
+    // desconectada/token expirado): cai para o progresso do Nuvio.
+    if (cards.length || simklAccount.snapshot) {
+      cards.forEach((card, index) => cwItemsMap.set(index, card));
+      renderContinueWatchingRow();
+      return;
+    }
   }
   cwUnlistenItem = await listen('home:continue-watching-item', (event) => {
     const { order, card } = event.payload;
@@ -1000,9 +1069,10 @@ async function refreshContinueWatching() {
   });
 
   try {
-    await invoke('start_continue_watching');
-  } catch {
-    // Non-fatal
+    const ack = await invoke('start_continue_watching');
+    if (ack && !ack.total) console.info('[continue-watching] nenhum item em progresso retornado');
+  } catch (error) {
+    console.warn('[continue-watching] falha ao carregar o progresso:', error);
   }
 }
 
@@ -3419,6 +3489,7 @@ function watchPartyState() {
 
 function renderPartySettings() {
   const status = document.getElementById('party-status');
+  const pageActive = document.getElementById('party-page-active');
   const codeRow = document.getElementById('party-code-row');
   const code = document.getElementById('party-code');
   const membersRow = document.getElementById('party-members-row');
@@ -3427,6 +3498,7 @@ function renderPartySettings() {
   const endBtn = document.getElementById('btn-party-end');
   if (!status) return;
   const view = partyLive;
+  if (pageActive) pageActive.hidden = !view.active && !view.error;
   if (view.active) {
     const count = (view.members || []).length;
     status.textContent = view.isHost
@@ -3679,17 +3751,7 @@ async function partyJoinByCode(rawCode) {
   }
 }
 
-async function partyJoin() {
-  const input = document.getElementById('party-join-code');
-  const ok = await partyJoinByCode(input?.value);
-  if (ok && input) input.value = '';
-}
-
 listen('party:state', (event) => applyPartyState(event.payload)).catch(() => {});
-document.getElementById('btn-party-join')?.addEventListener('click', partyJoin);
-document.getElementById('party-join-code')?.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter') partyJoin();
-});
 async function partyRefreshStatus() {
   try { applyPartyState(await invoke('party_status')); } catch { /* offline */ }
 }
@@ -3703,6 +3765,109 @@ document.getElementById('btn-party-end')?.addEventListener('click', async () => 
   partyRefreshStatus();
 });
 invoke('party_status').then(applyPartyState).catch(() => {});
+
+/* Sessão em grupo: página de entrada por código (Ajustes → Sessão em grupo) */
+function partyPageInputs() {
+  return Array.from(document.querySelectorAll('#party-code-boxes .party-code-box'));
+}
+
+function partyPageCode() {
+  return partyPageInputs().map((el) => el.value.trim()).join('').toUpperCase();
+}
+
+function syncPartyPageEnter() {
+  const btn = document.getElementById('btn-party-page-enter');
+  if (btn) btn.disabled = partyPageCode().length < 6;
+}
+
+function openGroupSessionPage() {
+  const avatar = document.getElementById('party-page-avatar-self');
+  if (avatar) {
+    const active = (authState?.profiles || []).find((p) => p.profile_index === authState?.active_profile_index)
+      || (authState?.profiles || [])[0];
+    avatar.textContent = String(active?.name || 'N').trim().charAt(0).toUpperCase() || 'N';
+    avatar.style.background = active?.avatar_color_hex || '';
+  }
+  partyPageInputs().forEach((el) => { el.value = ''; });
+  const err = document.getElementById('party-page-error');
+  if (err) err.textContent = '';
+  syncPartyPageEnter();
+  renderPartySettings();
+  showView('view-party');
+  setTimeout(() => partyPageInputs()[0]?.focus(), 40);
+}
+
+async function partyPageEnterClick() {
+  const code = partyPageCode();
+  if (code.length < 6) return;
+  const btn = document.getElementById('btn-party-page-enter');
+  const err = document.getElementById('party-page-error');
+  btn.disabled = true;
+  btn.textContent = 'Entrando…';
+  err.textContent = '';
+  const ok = await partyJoinByCode(code);
+  btn.textContent = 'Entrar';
+  if (ok) {
+    showView('view-app');
+    showToast('Você entrou na sessão em grupo.');
+    return;
+  }
+  btn.disabled = false;
+  err.textContent = partyLive.error || 'Não foi possível entrar. Confira o código e tente novamente.';
+}
+
+partyPageInputs().forEach((input, index, all) => {
+  input.addEventListener('input', () => {
+    const raw = input.value.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+    if (!raw) {
+      input.value = '';
+      syncPartyPageEnter();
+      return;
+    }
+    const chars = raw.split('');
+    input.value = chars[0];
+    let cursor = index + 1;
+    for (const ch of chars.slice(1)) {
+      if (cursor >= all.length) break;
+      all[cursor].value = ch;
+      cursor += 1;
+    }
+    if (cursor < all.length) all[cursor].focus();
+    else all[all.length - 1].blur();
+    syncPartyPageEnter();
+  });
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Backspace' && !input.value && index > 0) {
+      event.preventDefault();
+      all[index - 1].value = '';
+      all[index - 1].focus();
+      syncPartyPageEnter();
+    } else if (event.key === 'ArrowLeft' && index > 0) {
+      event.preventDefault();
+      all[index - 1].focus();
+    } else if (event.key === 'ArrowRight' && index < all.length - 1) {
+      event.preventDefault();
+      all[index + 1].focus();
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      partyPageEnterClick();
+    }
+  });
+  input.addEventListener('paste', (event) => {
+    const text = String(event.clipboardData?.getData('text') || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+    if (!text) return;
+    event.preventDefault();
+    all.forEach((el, i) => { el.value = text[i] || ''; });
+    syncPartyPageEnter();
+    all[Math.min(text.length, all.length - 1)].focus();
+  });
+});
+
+document.getElementById('btn-party-page-enter')?.addEventListener('click', partyPageEnterClick);
+document.getElementById('btn-party-page-back')?.addEventListener('click', () => showView('view-app'));
+document.getElementById('btn-open-group-session')?.addEventListener('click', openGroupSessionPage);
+document.getElementById('btn-open-connected-services')?.addEventListener('click', () => selectSettingsSection('cloud'));
+document.getElementById('btn-cloud-back')?.addEventListener('click', () => selectSettingsSection('connected'));
 
 let activePlayerCtx = null;
 
@@ -5654,7 +5819,8 @@ function renderFilteredLibrary() {
 
 // --- SETTINGS ---
 function selectSettingsSection(id) {
-  if (id === "connected") refreshConnectedAccounts();
+  if (!id) return;
+  if (id === "connected" || id === "cloud") refreshConnectedAccounts();
   document.querySelectorAll('.settings-cat-btn').forEach((b) => {
     b.classList.toggle('active', b.dataset.settingsSec === id);
   });
@@ -5677,7 +5843,6 @@ document.getElementById('settings-search-input').addEventListener('input', (e) =
 function updateAccountSettingsUi() {
   document.getElementById('set-account-status').textContent = authState?.signed_in ? 'Conectado' : 'Convidado (Local)';
   document.getElementById('set-account-email').textContent = authState?.email || '-';
-  document.getElementById('set-account-server').textContent = authState?.server?.backend_url || 'api.nuvio.tv';
   const active = (authState?.profiles || []).find((p) => p.profile_index === authState?.active_profile_index);
   document.getElementById('set-account-profile').textContent = active?.name || 'Local';
 }
@@ -5916,6 +6081,13 @@ const DISCORD_SERVICE_KEYS = new Set([
 document.querySelectorAll('[data-service]').forEach((el) => {
   if (!DISCORD_SERVICE_KEYS.has(el.dataset.service)) return;
   el.addEventListener('change', async () => {
+    // O mesmo ajuste aparece em mais de uma tela (ex.: Discord Rich Presence em Avançado e em Discord).
+    // Espelha o valor antes de ler o formulário, senão readServicesFromForm pega o campo duplicado antigo.
+    document.querySelectorAll(`[data-service="${el.dataset.service}"]`).forEach((peer) => {
+      if (peer === el) return;
+      if (peer.type === 'checkbox') peer.checked = el.checked;
+      else peer.value = el.value;
+    });
     const services = readServicesFromForm();
     try {
       await persistSettingsPatch({ services });
@@ -5930,26 +6102,27 @@ document.querySelectorAll('[data-service]').forEach((el) => {
   });
 });
 
-document.getElementById('btn-save-services').addEventListener('click', async () => {
+// Integrações (TMDB/MDBList) salvam sozinhas ao mudar, para não perder a opção ao fechar o app.
+async function persistServiceForm() {
   const services = readServicesFromForm();
-  const key = document.getElementById('set-tmdb-key').value.trim();
+  const tmdbKey = document.getElementById('set-tmdb-key')?.value.trim() || '';
   const status = document.getElementById('services-status');
-  if ((services.tmdb_enabled && !key) || (services.mdblist_enabled && !services.mdblist_key)) {
-    status.textContent = 'Informe a chave de API do serviço ativado.';
-    return;
-  }
   try {
-    await persistSettingsPatch({ tmdb_api_key: key, services });
-    sentPresence = 'null';
-    await syncDiscord(true);
+    await persistSettingsPatch({ tmdb_api_key: tmdbKey, services });
+    if (status) status.textContent = 'Salvo!';
+    heroRatings.clear();
+    renderHero();
   } catch {
-    status.textContent = 'Não foi possível salvar os serviços.';
-    return;
+    showToast('Não foi possível salvar as integrações.');
   }
-  heroRatings.clear();
-  renderHero();
-  document.getElementById('services-status').textContent = 'Salvo!';
+}
+
+document.querySelectorAll('[data-service]').forEach((el) => {
+  if (DISCORD_SERVICE_KEYS.has(el.dataset.service)) return;
+  el.addEventListener('change', persistServiceForm);
 });
+document.getElementById('set-tmdb-key')?.addEventListener('change', persistServiceForm);
+
 
 document.getElementById('set-dns-provider')?.addEventListener('change', async (e) => {
   const provider = e.target.value || 'cloudflare';
