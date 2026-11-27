@@ -1,0 +1,11 @@
+{
+  "name": "nuvio-webos",
+  "version": "1.0.0",
+  "private": true,
+  "description": "LG webOS standalone target for Nuvio (does not touch nuvio-desktop Windows/Linux)",
+  "scripts": {
+    "build": "node scripts/build-ipk.mjs",
+    "dev": "node scripts/build-ipk.mjs --stage-only && node service/service.js --dev",
+    "check": "node --check bridge/webos-qr.js && node --check bridge/webos-bridge.js && node --check bridge/webos-tv.js && node --check service/service.js && node --check scripts/build-ipk.mjs"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "com.nuvio.tv.service",
+  "version": "1.0.0",
+  "description": "Nuvio webOS Node.js background service for CORS-free HTTP and TV storage",
+  "main": "service.js",
+  "private": true
+}

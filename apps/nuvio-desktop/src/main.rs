@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod crash_log;
 mod discord;
 mod metrics;
 mod party;
@@ -13,6 +14,8 @@ mod player_overlay_linux;
 mod plugins_repo;
 mod skip;
 mod simkl;
+mod mdblist_lib;
+mod updater;
 
 use nuvio_core::integrations::addons::{
     AddonClient, AddonManifest, AddonStream, AddonSubtitle, MetaPreview,
@@ -39,14 +42,21 @@ use skip::{SkipChapter, SkipInterval, resolve_skip_intervals, submit_introdb_seg
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+
+const HOME_CATALOG_FRESH_SECS: u64 = 900;
+const HOME_CATALOG_CACHE_TTL_SECS: u64 = 24 * 3600;
+const DISCOVER_PAGE_CACHE_TTL_SECS: u64 = 300;
 
 struct AppState {
     paths: AppPaths,
     kv: KvStore,
     cache: CacheStore,
     addons_http: AddonClient,
+    home_catalog_gen: Arc<AtomicU64>,
     addon_search: Mutex<(u64, Option<tokio::task::JoinHandle<()>>)>,
     supabase: Arc<RwLock<Option<SupabaseClient>>>,
     player: EmbeddedPlayer,
@@ -120,6 +130,9 @@ fn default_hold_speed() -> f64 {
 }
 fn default_introdb_url() -> String {
     skip::DEFAULT_INTRODB_URL.to_string()
+}
+fn default_library_source() -> String {
+    "default".to_string()
 }
 fn default_custom_colors() -> Vec<String> {
     vec![
@@ -218,6 +231,10 @@ struct DesktopSettings {
     next_episode_enabled: bool,
     #[serde(default)]
     external_player_enabled: bool,
+    #[serde(default = "default_library_source")]
+    library_source: String,
+    #[serde(default = "default_library_source")]
+    progress_source: String,
     #[serde(default = "default_subtitle_style")]
     subtitle_style: SubtitleStylePayload,
 }
@@ -261,6 +278,8 @@ impl Default for DesktopSettings {
             pause_overlay_enabled: true,
             next_episode_enabled: true,
             external_player_enabled: false,
+            library_source: default_library_source(),
+            progress_source: default_library_source(),
             subtitle_style: default_subtitle_style(),
         }
     }
@@ -273,7 +292,7 @@ struct StoredAddon {
     enabled: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct CatalogSection {
     order: usize,
     key: String,
@@ -283,6 +302,13 @@ struct CatalogSection {
     media_type: String,
     catalog_id: String,
     items: Vec<MetaPreview>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedHomeCatalogs {
+    signature: String,
+    updated_at_secs: u64,
+    sections: Vec<CatalogSection>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -297,6 +323,13 @@ struct AddonStreamGroup {
 #[derive(Debug, Serialize)]
 struct ProgressiveStartAck {
     total: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct HomeCatalogStartAck {
+    total: usize,
+    cached_sections: Vec<CatalogSection>,
+    cache_fresh: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -359,6 +392,12 @@ async fn ensure_supabase_client(state: &AppState) -> Result<(SupabaseClient, Ser
         && existing.config().url == server.backend_url.trim_end_matches('/')
         && existing.config().anon_key == server.publishable_key
     {
+        if existing.current_session().is_none()
+            && let Some(session) = load_session_inner(&state.kv)
+        {
+            existing.import_session(session);
+        }
+        let _ = existing.ensure_fresh_session().await;
         return Ok((existing, server));
     }
 
@@ -368,8 +407,18 @@ async fn ensure_supabase_client(state: &AppState) -> Result<(SupabaseClient, Ser
     ))
     .map_err(|e| e.to_string())?;
 
+    let kv_for_session = state.kv.clone();
+    client.set_session_listener(move |sess| {
+        if let Ok(json) = serde_json::to_string(sess) {
+            let _ = kv_for_session
+                .namespace("auth")
+                .put_string("session_json", Some(&json));
+        }
+    });
+
     if let Some(session) = load_session_inner(&state.kv) {
         client.import_session(session);
+        let _ = client.ensure_fresh_session().await;
     }
 
     *state.supabase.write().expect("sb lock") = Some(client.clone());
@@ -403,8 +452,13 @@ async fn get_auth_status(state: State<'_, AppState>) -> Result<AuthStatusRespons
     };
 
     if let (Some(c), Some(sess)) = (client, saved_session) {
-        c.import_session(sess.clone());
-        let user = sess.user.clone();
+        let active_sess = if let Some(cur) = c.current_session() {
+            cur
+        } else {
+            c.import_session(sess.clone());
+            sess
+        };
+        let user = active_sess.user.clone();
         return Ok(AuthStatusResponse {
             signed_in: true,
             is_guest: false,
@@ -730,14 +784,52 @@ async fn pull_account_collections(state: State<'_, AppState>) -> Result<Vec<Valu
     }
 }
 
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn home_catalog_cache_key(profile_idx: i32) -> String {
+    format!("home_catalogs:p{profile_idx}")
+}
+
+fn load_cached_home_catalogs(cache: &CacheStore, key: &str) -> Option<CachedHomeCatalogs> {
+    let raw = cache.get(key).ok().flatten()?;
+    serde_json::from_slice(&raw).ok()
+}
+
+fn save_cached_home_catalogs(cache: &CacheStore, key: &str, entry: &CachedHomeCatalogs) {
+    if let Ok(bytes) = serde_json::to_vec(entry) {
+        let _ = cache.set(key, &bytes, Some(HOME_CATALOG_CACHE_TTL_SECS));
+    }
+}
+
+fn catalog_items_changed(prev: Option<&CatalogSection>, next_items: &[MetaPreview]) -> bool {
+    let Some(prev) = prev else {
+        return true;
+    };
+    if prev.items.len() != next_items.len() {
+        return true;
+    }
+    serde_json::to_vec(&prev.items).ok() != serde_json::to_vec(next_items).ok()
+}
+
 /// Progressively fetches catalogs across enabled addons and emits `home:section`
 /// as soon as each catalog responds (matching `HomeRepository.kt` incremental publish).
+/// Uses stale-while-revalidate disk cache so startup renders instantly.
 #[tauri::command]
 async fn start_home_catalogs(
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<ProgressiveStartAck, String> {
+    force: Option<bool>,
+) -> Result<HomeCatalogStartAck, String> {
+    let setup_started = std::time::Instant::now();
+    let force = force.unwrap_or(false);
+    let profile_idx = active_profile_idx(&state.kv);
     let addons = load_addons_inner(&state.kv)?;
+    let enabled_addons = addons.iter().filter(|a| a.enabled).count();
     let mut requests = Vec::new();
     for addon in addons.into_iter().filter(|a| a.enabled) {
         for cat in &addon.manifest.catalogs {
@@ -762,41 +854,154 @@ async fn start_home_catalogs(
     }
 
     let total = requests.len();
+    let batch_gen = state.home_catalog_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    let signature = requests
+        .iter()
+        .map(|(_, m, t, id, _)| format!("{}|{t}|{id}", m.transport_url))
+        .collect::<Vec<_>>()
+        .join(";");
+    let cache_key = home_catalog_cache_key(profile_idx);
+    let cached_entry = if total > 0 {
+        load_cached_home_catalogs(&state.cache, &cache_key).filter(|c| c.signature == signature && !c.sections.is_empty())
+    } else {
+        None
+    };
+
+    let mut cached_by_order: HashMap<usize, CatalogSection> = HashMap::new();
+    let mut initial_cached_sections: Vec<CatalogSection> = Vec::new();
+    if let Some(ref cached) = cached_entry {
+        for sec in &cached.sections {
+            cached_by_order.insert(sec.order, sec.clone());
+        }
+        initial_cached_sections = cached.sections.clone();
+        let age_secs = now_unix_secs().saturating_sub(cached.updated_at_secs);
+        crash_log::note(&format!(
+            "home: cache hit ({} secoes, idade {}s) em {} ms",
+            cached.sections.len(),
+            age_secs,
+            setup_started.elapsed().as_millis()
+        ));
+        if !force && age_secs < HOME_CATALOG_FRESH_SECS {
+            let _ = app.emit("home:done", total);
+            return Ok(HomeCatalogStartAck {
+                total,
+                cached_sections: initial_cached_sections,
+                cache_fresh: true,
+            });
+        }
+    } else {
+        crash_log::note(&format!(
+            "home: {total} catalogos de {enabled_addons} addons preparados em {} ms",
+            setup_started.elapsed().as_millis()
+        ));
+    }
+
+    if total == 0 {
+        let _ = app.emit("home:done", 0usize);
+        return Ok(HomeCatalogStartAck {
+            total: 0,
+            cached_sections: Vec::new(),
+            cache_fresh: true,
+        });
+    }
+
     let shared_http = state.addons_http.clone();
+    let cache_store = state.cache.clone();
+    let gen_counter = Arc::clone(&state.home_catalog_gen);
+    let cached_by_order = Arc::new(cached_by_order);
     tokio::spawn(async move {
+        let batch_started = std::time::Instant::now();
         let mut handles = Vec::with_capacity(total);
         for (order, manifest, media_type, catalog_id, title) in requests {
             let app_clone = app.clone();
             let http = shared_http.clone();
+            let gen_ref = Arc::clone(&gen_counter);
+            let cached_map = Arc::clone(&cached_by_order);
             handles.push(tokio::spawn(async move {
-                if let Ok(items) = http
-                        .fetch_catalog(&manifest, &media_type, &catalog_id, None, Some(20))
-                        .await
-                    && !items.is_empty()
-                {
-                    let _ = app_clone.emit(
-                        "home:section",
-                        CatalogSection {
+                let started = std::time::Instant::now();
+                let fetched = http
+                    .fetch_catalog(&manifest, &media_type, &catalog_id, None, Some(20))
+                    .await;
+                let elapsed = started.elapsed().as_millis();
+                if gen_ref.load(Ordering::SeqCst) != batch_gen {
+                    return None;
+                }
+                match fetched {
+                    Ok(items) if !items.is_empty() => {
+                        let prev = cached_map.get(&order);
+                        let changed = catalog_items_changed(prev, &items);
+                        let sec = CatalogSection {
                             order,
                             key: format!("{}:{media_type}:{catalog_id}", manifest.id),
-                            title,
-                            addon_name: manifest.name,
-                            manifest_url: manifest.transport_url,
+                            title: title.clone(),
+                            addon_name: manifest.name.clone(),
+                            manifest_url: manifest.transport_url.clone(),
                             media_type,
                             catalog_id,
                             items,
-                        },
-                    );
+                        };
+                        crash_log::note(&format!(
+                            "home: \"{}\" [{}] {} itens em {elapsed} ms{}",
+                            title,
+                            manifest.name,
+                            sec.items.len(),
+                            if changed { "" } else { " (sem alteracoes)" }
+                        ));
+                        if changed {
+                            let _ = app_clone.emit("home:section", &sec);
+                        }
+                        Some(sec)
+                    }
+                    Ok(_) => {
+                        crash_log::note(&format!(
+                            "home: \"{}\" [{}] vazio em {elapsed} ms",
+                            title, manifest.name
+                        ));
+                        None
+                    }
+                    Err(err) => {
+                        crash_log::note(&format!(
+                            "home: \"{}\" [{}] falhou em {elapsed} ms: {err}",
+                            title, manifest.name
+                        ));
+                        cached_map.get(&order).cloned()
+                    }
                 }
             }));
         }
+        let mut collected = Vec::new();
         for h in handles {
-            let _ = h.await;
+            if let Ok(Some(sec)) = h.await {
+                collected.push(sec);
+            }
         }
+        if gen_counter.load(Ordering::SeqCst) != batch_gen {
+            return;
+        }
+        collected.sort_by_key(|s| s.order);
+        if !collected.is_empty() {
+            save_cached_home_catalogs(
+                &cache_store,
+                &cache_key,
+                &CachedHomeCatalogs {
+                    signature,
+                    updated_at_secs: now_unix_secs(),
+                    sections: collected,
+                },
+            );
+        }
+        crash_log::note(&format!(
+            "home: lote concluido em {} ms ({total} catalogos)",
+            batch_started.elapsed().as_millis()
+        ));
         let _ = app.emit("home:done", total);
     });
 
-    Ok(ProgressiveStartAck { total })
+    Ok(HomeCatalogStartAck {
+        total,
+        cached_sections: initial_cached_sections,
+        cache_fresh: false,
+    })
 }
 
 /// Pulls `sync_pull_watch_progress` from Supabase and emits Continue Watching items
@@ -1030,11 +1235,33 @@ async fn load_catalog_page(
         parts.push(format!("skip={s}"));
     }
     let extra = (!parts.is_empty()).then(|| parts.join("&"));
-    state
+    let can_cache = search.as_deref().map(str::trim).is_none_or(str::is_empty);
+    let page_cache_key = format!(
+        "catalog_page:{}:{media_type}:{catalog_id}:{}",
+        manifest.transport_url,
+        extra.as_deref().unwrap_or("")
+    );
+    if can_cache
+        && let Some(raw) = state.cache.get(&page_cache_key).ok().flatten()
+        && let Ok(cached_items) = serde_json::from_slice::<Vec<MetaPreview>>(&raw)
+    {
+        return Ok(cached_items);
+    }
+
+    let items = state
         .addons_http
         .fetch_catalog(&manifest, &media_type, &catalog_id, extra.as_deref(), None)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    if can_cache
+        && !items.is_empty()
+        && let Ok(bytes) = serde_json::to_vec(&items)
+    {
+        let _ = state
+            .cache
+            .set(&page_cache_key, &bytes, Some(DISCOVER_PAGE_CACHE_TTL_SECS));
+    }
+    Ok(items)
 }
 
 #[tauri::command]
@@ -1218,6 +1445,12 @@ fn get_diagnostics(state: State<'_, AppState>) -> DiagnosticsResponse {
     }
 }
 
+/// Tempos de arranque reportados pela UI, gravados no crash.log.
+#[tauri::command]
+fn frontend_log(message: String) {
+    crash_log::note(&format!("ui: {message}"));
+}
+
 #[tauri::command]
 fn load_settings(state: State<'_, AppState>) -> DesktopSettings {
     load_settings_inner(&state.kv)
@@ -1347,6 +1580,25 @@ fn open_external_url(url: String) -> Result<(), String> {
     spawn_res.map(|_| ()).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn check_app_update() -> Result<updater::AppUpdateInfo, String> {
+    updater::check_for_updates().await
+}
+
+#[tauri::command]
+async fn install_app_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    asset_url: String,
+    asset_size: Option<u64>,
+) -> Result<(), String> {
+    updater::download_and_install_update(&app, &state.paths.cache_dir, &asset_url, asset_size)
+        .await?;
+    state.player.stop();
+    app.exit(0);
+    Ok(())
+}
+
 /// Progressively fetches streams from every supporting addon and active JS scraper in parallel,
 /// emitting `streams:addon` as each provider responds and `streams:active_scrapers` while scrapers run.
 #[tauri::command]
@@ -1368,11 +1620,15 @@ async fn start_stream_search(
 
     let settings = load_settings_inner(&state.kv);
     let plugins_state = load_plugins_state(&state.kv);
-    let active_scrapers: Vec<plugins_repo::PluginScraperItem> = if plugins_state.plugins_enabled {
+    let active_scrapers: Vec<(plugins_repo::PluginScraperItem, String)> = if plugins_state.plugins_enabled {
         plugins_state
             .scrapers
             .into_iter()
             .filter(|s| s.enabled && s.supports_type(&media_type))
+            .map(|s| {
+                let cfg = plugins_repo::load_scraper_settings(&state.kv, &s.id);
+                (s, cfg)
+            })
             .collect()
     } else {
         Vec::new()
@@ -1388,7 +1644,7 @@ async fn start_stream_search(
     let will_run_scrapers = !active_scrapers.is_empty() && (resolved_tmdb.is_some() || can_resolve_imdb);
 
     let scraper_names: Vec<String> = if will_run_scrapers {
-        active_scrapers.iter().map(|s| s.name.clone()).collect()
+        active_scrapers.iter().map(|(s, _)| s.name.clone()).collect()
     } else {
         Vec::new()
     };
@@ -1447,11 +1703,11 @@ async fn start_stream_search(
                 let remaining = Arc::new(std::sync::Mutex::new(
                     active_scrapers
                         .iter()
-                        .map(|s| s.name.clone())
+                        .map(|(s, _)| s.name.clone())
                         .collect::<Vec<_>>(),
                 ));
                 let mut scraper_handles = Vec::with_capacity(active_scrapers.len());
-                for (s_idx, scraper) in active_scrapers.into_iter().enumerate() {
+                for (s_idx, (scraper, settings_c)) in active_scrapers.into_iter().enumerate() {
                     let app_clone = app_sc.clone();
                     let mt = mt_sc.clone();
                     let tid_c = tid.clone();
@@ -1465,6 +1721,7 @@ async fn start_stream_search(
                             season,
                             episode,
                             &key_c,
+                            &settings_c,
                         )
                         .await;
                         if let Ok(list) = res
@@ -1615,9 +1872,59 @@ async fn test_plugin_scraper(
         .find(|s| s.id == scraper_id)
         .ok_or_else(|| "Scraper não encontrado.".to_string())?;
     let settings = load_settings_inner(&state.kv);
+    let scraper_settings = plugins_repo::load_scraper_settings(&state.kv, &scraper.id);
     let media_type = if scraper.supports_type("movie") { "movie" } else { "tv" };
     let (s, e) = if media_type == "tv" { (Some(1), Some(1)) } else { (None, None) };
-    plugins_repo::run_scraper_for_stream(&scraper, "603", media_type, s, e, &settings.tmdb_api_key).await
+    plugins_repo::run_scraper_for_stream(
+        &scraper,
+        "603",
+        media_type,
+        s,
+        e,
+        &settings.tmdb_api_key,
+        &scraper_settings,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn get_plugin_settings_layout(
+    state: State<'_, AppState>,
+    scraper_id: String,
+) -> Result<serde_json::Value, String> {
+    let ps = load_plugins_state(&state.kv);
+    let scraper = ps
+        .scrapers
+        .into_iter()
+        .find(|s| s.id == scraper_id)
+        .ok_or_else(|| "Scraper não encontrado.".to_string())?;
+    let settings = load_settings_inner(&state.kv);
+    let saved_raw = plugins_repo::load_scraper_settings(&state.kv, &scraper.id);
+    let layout_raw = PluginRuntime::get_settings_layout(
+        scraper.code,
+        scraper.id.clone(),
+        saved_raw.clone(),
+        settings.tmdb_api_key,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let layout: serde_json::Value =
+        serde_json::from_str(&layout_raw).unwrap_or_else(|_| serde_json::json!([]));
+    let values: serde_json::Value =
+        serde_json::from_str(&saved_raw).unwrap_or_else(|_| serde_json::json!({}));
+    Ok(serde_json::json!({
+        "layout": layout,
+        "values": values,
+    }))
+}
+
+#[tauri::command]
+fn save_plugin_scraper_settings(
+    state: State<'_, AppState>,
+    scraper_id: String,
+    settings: serde_json::Value,
+) -> Result<(), String> {
+    plugins_repo::save_scraper_settings(&state.kv, &scraper_id, &settings.to_string())
 }
 
 // --- FOLLOWED PEOPLE (LOCAL PER-PROFILE SQLITE) ---
@@ -2282,10 +2589,9 @@ fn launch_mpv_external(
         cmd.arg(format!("--include={}", path.display()));
     }
     if let Some(hdrs) = headers
-        && !hdrs.is_empty()
+        && let Some(arg_val) = player::format_external_mpv_header_fields(&hdrs)
     {
-        let fields: Vec<String> = hdrs.into_iter().map(|(k, v)| format!("{k}: {v}")).collect();
-        cmd.arg(format!("--http-header-fields={}", fields.join(",")));
+        cmd.arg(format!("--http-header-fields={arg_val}"));
     }
     cmd.arg("--").arg(clean_url);
     cmd.spawn()
@@ -2624,6 +2930,9 @@ fn resolve_mpv_binary(configured: &str) -> String {
 }
 
 fn main() {
+    // Instalado antes de qualquer inicialização para apanhar pânicos de arranque.
+    crash_log::install();
+
     #[cfg(target_os = "linux")]
     {
         if std::env::var_os("DISPLAY").is_some() && std::env::var_os("GDK_BACKEND").is_none() {
@@ -2648,6 +2957,7 @@ fn main() {
         kv,
         cache,
         addons_http,
+        home_catalog_gen: Arc::new(AtomicU64::new(0)),
         addon_search: Mutex::default(),
         supabase: Arc::new(RwLock::new(None)),
         player: EmbeddedPlayer::new(),
@@ -2660,6 +2970,12 @@ fn main() {
             get_auth_status,
             simkl::simkl_status,
             simkl::simkl_action,
+            mdblist_lib::mdblist_library_sync,
+            mdblist_lib::mdblist_library_mutate,
+            mdblist_lib::mdblist_account_status,
+            mdblist_lib::mdblist_progress_sync,
+            mdblist_lib::mdblist_watched_mutate,
+            mdblist_lib::mdblist_scrobble,
             sign_in_email,
             sign_up_email,
             continue_as_guest,
@@ -2697,6 +3013,7 @@ fn main() {
             services::resolve_people_photos,
             services::hero_ratings,
             get_diagnostics,
+            frontend_log,
             load_settings,
             save_settings,
             list_addons,
@@ -2724,6 +3041,8 @@ fn main() {
             toggle_plugin_scraper,
             set_plugins_enabled,
             test_plugin_scraper,
+            get_plugin_settings_layout,
+            save_plugin_scraper_settings,
             list_followed_people,
             save_followed_people,
             profile_insights,
@@ -2758,6 +3077,8 @@ fn main() {
             player_stop,
             window_toggle_fullscreen,
             launch_mpv,
+            check_app_update,
+            install_app_update,
         ])
         .on_window_event(|window, event| {
             if window.label() != "main" {
@@ -2788,7 +3109,27 @@ fn main() {
 
 #[cfg(test)]
 mod insights_tests {
-    use super::parse_watched_key_item;
+    use super::{
+        CatalogSection, catalog_items_changed, home_catalog_cache_key, parse_watched_key_item,
+    };
+    use nuvio_core::integrations::addons::MetaPreview;
+
+    fn sample_meta(id: &str, name: &str) -> MetaPreview {
+        MetaPreview {
+            id: id.to_string(),
+            r#type: "movie".to_string(),
+            name: name.to_string(),
+            poster: None,
+            banner: None,
+            logo: None,
+            poster_shape: "poster".to_string(),
+            description: None,
+            release_info: None,
+            imdb_rating: None,
+            genres: Vec::new(),
+            runtime: None,
+        }
+    }
 
     #[test]
     fn parses_movie_and_series_watched_keys() {
@@ -2803,5 +3144,25 @@ mod insights_tests {
         assert_eq!(mv.content_type, "movie");
         assert_eq!(mv.season, None);
         assert_eq!(mv.episode, None);
+    }
+
+    #[test]
+    fn detects_catalog_item_changes_for_swr_cache() {
+        assert_eq!(home_catalog_cache_key(2), "home_catalogs:p2");
+        let item_a = sample_meta("tt01", "Alpha");
+        let item_b = sample_meta("tt02", "Beta");
+        let cached = CatalogSection {
+            order: 0,
+            key: "k".to_string(),
+            title: "Popular".to_string(),
+            addon_name: "Addon".to_string(),
+            manifest_url: "https://example.com/manifest.json".to_string(),
+            media_type: "movie".to_string(),
+            catalog_id: "top".to_string(),
+            items: vec![item_a.clone()],
+        };
+        assert!(!catalog_items_changed(Some(&cached), &[item_a.clone()]));
+        assert!(catalog_items_changed(Some(&cached), &[item_b]));
+        assert!(catalog_items_changed(None, &[item_a]));
     }
 }

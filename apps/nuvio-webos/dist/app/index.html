@@ -1,0 +1,1189 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Nuvio</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="webos-tv.css" />
+</head>
+<body data-theme="white">
+
+  <!-- 1. AUTH SCREEN (1:1 AuthScreen.kt AuthLargeLayout) -->
+  <div id="view-auth" class="view">
+    <div class="auth-shell">
+      <div class="auth-brand-pane">
+        <img src="assets/app_logo_wordmark.png" alt="Nuvio" class="auth-wordmark" />
+        <h1 class="auth-tagline">Assista sua biblioteca em qualquer lugar</h1>
+        <p class="auth-tagline-sub">Entre para sincronizar perfis, addons e progresso entre dispositivos</p>
+      </div>
+
+      <div class="auth-form-pane">
+        <div class="auth-server-bar">
+          <span class="server-pill" id="auth-server-pill">api.nuvio.tv</span>
+          <div class="menu-wrap">
+            <button class="icon-btn" id="btn-server-menu" title="Opções de servidor">&#8942;</button>
+            <div class="dropdown-menu hidden" id="server-menu-dropdown">
+              <button id="btn-use-official-server">Usar servidor oficial (api.nuvio.tv)</button>
+              <button id="btn-open-custom-server">Conectar a servidor customizado…</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="auth-form-box">
+          <h2 id="auth-heading">Bem-vindo de volta</h2>
+          <p class="auth-subtitle" id="auth-subtitle">Entre para acessar sua biblioteca e seu histórico</p>
+
+          <div class="auth-field">
+            <svg viewBox="0 0 24 24" class="field-icon"><path fill="currentColor" d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2m0 4l-8 5l-8-5V6l8 5l8-5z"/></svg>
+            <input type="email" id="auth-email" placeholder="E-mail" autocomplete="email" />
+          </div>
+
+          <div class="auth-field">
+            <svg viewBox="0 0 24 24" class="field-icon"><path fill="currentColor" d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2m-6 9c-1.1 0-2-.9-2-2s.9-2 2-2s2 .9 2 2s-.9 2-2 2m3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1s3.1 1.39 3.1 3.1z"/></svg>
+            <input type="password" id="auth-password" placeholder="Senha" autocomplete="current-password" />
+            <button type="button" class="eye-btn" id="btn-toggle-pass" title="Mostrar/ocultar senha">
+              <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5M12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5s5 2.24 5 5s-2.24 5-5 5m0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3s3-1.34 3-3s-1.34-3-3-3"/></svg>
+            </button>
+          </div>
+
+          <div class="auth-error hidden" id="auth-error"></div>
+
+          <button class="auth-primary-btn" id="btn-auth-submit">Entrar</button>
+
+          <div class="auth-toggle-row">
+            <span id="auth-toggle-prompt">Não tem uma conta?</span>
+            <button class="link-btn" id="btn-auth-toggle-mode">Criar conta</button>
+          </div>
+
+          <div class="auth-divider"><span>ou</span></div>
+
+          <div id="device-link-area">
+            <button class="auth-secondary-btn" id="btn-device-link">Entrar com Código (Link)</button>
+          </div>
+
+          <div class="device-link-box hidden" id="device-link-waiting">
+            <div class="device-link-code" id="device-link-code">------</div>
+            <div class="device-link-hint">
+              Acesse <a href="#" id="device-link-url" target="_blank" rel="noreferrer">nuvio.tv/link</a> e digite este código.
+            </div>
+            <div class="device-link-status" id="device-link-status">Aguardando aprovação…</div>
+            <button class="link-btn" id="btn-device-link-cancel">Cancelar</button>
+          </div>
+
+          <button class="auth-guest-btn" id="btn-auth-guest">
+            Continuar sem conta
+            <span>Seus dados ficarão salvos apenas neste computador</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. PROFILE SELECTION SCREEN -->
+  <div id="view-profiles" class="view">
+    <div class="profiles-shell">
+      <img src="assets/app_logo_wordmark.png" alt="Nuvio" class="profiles-wordmark" />
+      <h1 class="profiles-heading">Quem está assistindo?</h1>
+      <div class="profiles-grid" id="profiles-grid"></div>
+      <div class="profiles-actions">
+        <button class="btn-ghost" id="btn-profiles-signout">Sair da conta</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. MAIN DESKTOP SHELL -->
+  <div id="view-app" class="view">
+    <div class="desktop-shell" id="desktop-shell">
+      <!-- FLOATING TOP GLASS NAV BAR (DesktopNavigationBar.kt alternative) -->
+      <header class="desktop-topnav hidden" id="desktop-topnav">
+        <div class="topnav-brand">
+          <img src="assets/app_logo_wordmark.png" alt="Nuvio" class="topnav-logo" />
+        </div>
+        <nav class="topnav-pill">
+          <button class="topnav-item active" data-tab="home"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#nav-home"/></svg><span>Início</span></button>
+          <button class="topnav-item" data-tab="search"><svg viewBox="0 0 20 20" aria-hidden="true"><use href="#nav-search"/></svg><span>Buscar</span></button>
+          <button class="topnav-item" data-tab="library"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#nav-library"/></svg><span>Biblioteca</span></button>
+          <button class="topnav-item" data-tab="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#nav-settings"/></svg><span>Ajustes</span></button>
+        </nav>
+        <button class="topnav-profile-btn" id="btn-topnav-profile" title="Trocar perfil">
+          <div class="mini-avatar" id="topnav-avatar">N</div>
+          <span id="topnav-profile-name">Perfil</span>
+        </button>
+      </header>
+
+      <!-- COLLAPSING SIDEBAR (AppShellComponents.kt DesktopSidebar) -->
+      <aside class="desktop-sidebar" id="desktop-sidebar">
+        <button class="sidebar-profile-trigger" id="btn-sidebar-profile" title="Alternar perfil">
+          <div class="sidebar-icon-slot">
+            <div class="mini-avatar" id="sidebar-avatar">N</div>
+          </div>
+          <span class="sidebar-label" id="sidebar-profile-name">Perfil</span>
+        </button>
+
+        <nav class="sidebar-nav">
+          <button class="sidebar-item active" data-tab="home">
+            <div class="sidebar-icon-slot">
+              <svg viewBox="0 0 24 24" class="nav-svg"><g id="nav-home"><path fill="currentColor" d="M10 20v-6h4v6h5v-8h3L12 3L2 12h3v8z"/></g></svg>
+            </div>
+            <span class="sidebar-label">Início</span>
+          </button>
+          <button class="sidebar-item" data-tab="search">
+            <div class="sidebar-icon-slot">
+              <svg viewBox="0 0 20 20" class="nav-svg" aria-hidden="true"><g id="nav-search"><path fill="currentColor" fill-rule="evenodd" d="M4,9a5,5 0,1 1,10 0A5,5 0,0 1,4 9zm5,-7a7,7 0,1 0,4.2 12.6 0.999,0.999 0,0 0,0.093 0.107l3,3a1,1 0,0 0,1.414 -1.414l-3,-3a0.999,0.999 0,0 0,-0.107 -0.093A7,7 0,0 0,9 2z"/></g></svg>
+            </div>
+            <span class="sidebar-label">Buscar</span>
+          </button>
+          <button class="sidebar-item" data-tab="library">
+            <div class="sidebar-icon-slot">
+              <svg viewBox="0 0 24 24" class="nav-svg" aria-hidden="true"><g id="nav-library"><path fill="currentColor" fill-rule="nonzero" d="M8.50989,2.00001H15.49C15.7225,1.99995 15.9007,1.99991 16.0565,2.01515C17.1643,2.12352 18.0711,2.78958 18.4556,3.68678H5.54428C5.92879,2.78958 6.83555,2.12352 7.94337,2.01515C8.09917,1.99991 8.27741,1.99995 8.50989,2.00001Z"/><path fill="currentColor" fill-rule="nonzero" d="M6.31052,4.72312C4.91989,4.72312 3.77963,5.56287 3.3991,6.67691C3.39117,6.70013 3.38356,6.72348 3.37629,6.74693C3.77444,6.62636 4.18881,6.54759 4.60827,6.49382C5.68865,6.35531 7.05399,6.35538 8.64002,6.35547L8.75846,6.35547L15.5321,6.35547C17.1181,6.35538 18.4835,6.35531 19.5639,6.49382C19.9833,6.54759 20.3977,6.62636 20.7958,6.74693C20.7886,6.72348 20.781,6.70013 20.773,6.67691C20.3925,5.56287 19.2522,4.72312 17.8616,4.72312H6.31052Z"/><path fill="currentColor" fill-rule="evenodd" d="M8.67239,7.54204H15.3276C18.7024,7.54204 20.3898,7.54204 21.3377,8.52887C22.2855,9.5157 22.0625,11.0403 21.6165,14.0896L21.1935,16.9811C20.8437,19.3724 20.6689,20.568 19.7717,21.284C18.8745,22 17.5512,22 14.9046,22H9.09536C6.44881,22 5.12553,22 4.22834,21.284C3.33115,20.568 3.15626,19.3724 2.80648,16.9811L2.38351,14.0896C1.93748,11.0403 1.71447,9.5157 2.66232,8.52887C3.61017,7.54204 5.29758,7.54204 8.67239,7.54204ZM8,18.0001C8,17.5859 8.3731,17.2501 8.83333,17.2501H15.1667C15.6269,17.2501 16,17.5859 16,18.0001C16,18.4144 15.6269,18.7502 15.1667,18.7502H8.83333C8.3731,18.7502 8,18.4144 8,18.0001Z"/></g></svg>
+            </div>
+            <span class="sidebar-label">Biblioteca</span>
+          </button>
+          <button class="sidebar-item" data-tab="settings">
+            <div class="sidebar-icon-slot">
+              <svg viewBox="0 0 24 24" class="nav-svg" aria-hidden="true"><g id="nav-settings"><path fill="currentColor" fill-rule="evenodd" d="M14.2788,2.15224C13.9085,2 13.439,2 12.5,2C11.561,2 11.0915,2 10.7212,2.15224C10.2274,2.35523 9.83509,2.74458 9.63056,3.23463C9.53719,3.45834 9.50065,3.7185 9.48635,4.09799C9.46534,4.65568 9.17716,5.17189 8.69017,5.45093C8.20318,5.72996 7.60864,5.71954 7.11149,5.45876C6.77318,5.2813 6.52789,5.18262 6.28599,5.15102C5.75609,5.08178 5.22018,5.22429 4.79616,5.5472C4.47814,5.78938 4.24339,6.1929 3.7739,6.99993C3.30441,7.80697 3.06967,8.21048 3.01735,8.60491C2.94758,9.1308 3.09118,9.66266 3.41655,10.0835C3.56506,10.2756 3.77377,10.437 4.0977,10.639C4.57391,10.936 4.88032,11.4419 4.88029,12C4.88026,12.5581 4.57386,13.0639 4.0977,13.3608C3.77372,13.5629 3.56497,13.7244 3.41645,13.9165C3.09108,14.3373 2.94749,14.8691 3.01725,15.395C3.06957,15.7894 3.30432,16.193 3.7738,17C4.24329,17.807 4.47804,18.2106 4.79606,18.4527C5.22008,18.7756 5.75599,18.9181 6.28589,18.8489C6.52778,18.8173 6.77305,18.7186 7.11133,18.5412C7.60852,18.2804 8.2031,18.27 8.69012,18.549C9.17714,18.8281 9.46533,19.3443 9.48635,19.9021C9.50065,20.2815 9.53719,20.5417 9.63056,20.7654C9.83509,21.2554 10.2274,21.6448 10.7212,21.8478C11.0915,22 11.561,22 12.5,22C13.439,22 13.9085,22 14.2788,21.8478C14.7726,21.6448 15.1649,21.2554 15.3694,20.7654C15.4628,20.5417 15.4994,20.2815 15.5137,19.902C15.5347,19.3443 15.8228,18.8281 16.3098,18.549C16.7968,18.2699 17.3914,18.2804 17.8886,18.5412C18.2269,18.7186 18.4721,18.8172 18.714,18.8488C19.2439,18.9181 19.7798,18.7756 20.2038,18.4527C20.5219,18.2105 20.7566,17.807 21.2261,16.9999C21.6956,16.1929 21.9303,15.7894 21.9827,15.395C22.0524,14.8691 21.9088,14.3372 21.5835,13.9164C21.4349,13.7243 21.2262,13.5628 20.9022,13.3608C20.4261,13.0639 20.1197,12.558 20.1197,11.9999C20.1197,11.4418 20.4261,10.9361 20.9022,10.6392C21.2263,10.4371 21.435,10.2757 21.5836,10.0835C21.9089,9.66273 22.0525,9.13087 21.9828,8.60497C21.9304,8.21055 21.6957,7.80703 21.2262,7C20.7567,6.19297 20.522,5.78945 20.2039,5.54727C19.7799,5.22436 19.244,5.08185 18.7141,5.15109C18.4722,5.18269 18.2269,5.28136 17.8887,5.4588C17.3915,5.71959 16.7969,5.73002 16.3099,5.45096C15.8229,5.17191 15.5347,4.65566 15.5136,4.09794C15.4993,3.71848 15.4628,3.45833 15.3694,3.23463C15.1649,2.74458 14.7726,2.35523 14.2788,2.15224ZM12.5,15C14.1695,15 15.5228,13.6569 15.5228,12C15.5228,10.3431 14.1695,9 12.5,9C10.8305,9 9.47716,10.3431 9.47716,12C9.47716,13.6569 10.8305,15 12.5,15Z"/></g></svg>
+            </div>
+            <span class="sidebar-label">Ajustes</span>
+          </button>
+        </nav>
+      </aside>
+
+      <!-- Floating profile switcher: fixed so the collapsed sidebar never clips it -->
+      <div class="profile-switcher-stack hidden" id="profile-switcher-stack"></div>
+
+      <main class="main-viewport" id="main-viewport">
+        <!-- HOME TAB -->
+        <section class="tab-panel active" id="tab-home">
+          <div id="home-hero-container"></div>
+          <div id="home-cw-container" class="home-cw-wrap hidden"></div>
+          <div id="home-collections-container" class="home-collections-wrap hidden"></div>
+          <div id="home-catalogs-container" class="home-shelves"></div>
+        </section>
+
+        <!-- FULL CATALOG TAB -->
+        <section class="tab-panel padded-page" id="tab-catalog">
+          <div class="catalog-top-bar">
+            <button class="circle-back-btn" id="btn-catalog-back" title="Voltar">
+              <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M15.41 7.41L14 6l-6 6l6 6l1.41-1.41L10.83 12z"/></svg>
+            </button>
+            <div>
+              <h2 id="catalog-page-title" style="margin:0;">Catálogo</h2>
+              <p class="muted" id="catalog-page-sub"></p>
+            </div>
+          </div>
+          <div class="poster-grid" id="catalog-full-grid"></div>
+          <div class="catalog-load-more-wrap">
+            <button class="btn-ghost hidden" id="btn-catalog-load-more">Carregar mais</button>
+            <span class="status-text" id="catalog-full-status"></span>
+          </div>
+        </section>
+
+        <!-- FULL-SCREEN META DETAILS SCREEN (MetaDetailsScreen.kt + DesktopDetailHero.kt) -->
+        <section class="tab-panel" id="tab-details">
+          <div class="detail-screen-backdrop" id="detail-screen-backdrop"></div>
+          <div id="detail-hero-wrapper"></div>
+          <div id="detail-body-wrapper" class="detail-body-section"></div>
+        </section>
+
+        <!-- FULL-SCREEN PERSON (ACTOR) SCREEN -->
+        <section class="tab-panel" id="tab-person">
+          <div id="person-hero-wrapper"></div>
+          <div id="person-body-wrapper" class="detail-body-section"></div>
+        </section>
+
+        <!-- FULL-SCREEN STREAMS SCREEN (StreamsTabletLayout.kt) -->
+        <section class="tab-panel" id="tab-streams">
+          <div class="streams-screen-root" id="streams-screen-root">
+            <div class="streams-bg-image" id="streams-bg-image"></div>
+            <div class="streams-bg-scrim"></div>
+            <button class="circle-back-btn streams-back-floating" id="btn-streams-back" title="Voltar">
+              <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M15.41 7.41L14 6l-6 6l6 6l1.41-1.41L10.83 12z"/></svg>
+            </button>
+            <div class="streams-split-layout">
+              <div class="streams-left-pane">
+                <div class="streams-meta-summary" id="streams-meta-summary"></div>
+              </div>
+              <div class="streams-right-pane">
+                <div class="streams-resume-banner hidden" id="streams-resume-banner"></div>
+                <div class="streams-filter-row" id="streams-filter-row"></div>
+                <div class="streams-active-scrapers hidden" id="streams-active-scrapers"></div>
+                <div class="streams-status-bar" id="streams-status-bar">Buscando nos addons…</div>
+                <div class="streams-cards-list" id="streams-cards-list"></div>
+              </div>
+            </div>
+            <div class="stream-actions-popup hidden" id="stream-actions-popup" role="menu"></div>
+          </div>
+        </section>
+
+        <!-- SEARCH & DISCOVER TAB (SearchScreen.kt) -->
+        <section class="tab-panel padded-page" id="tab-search">
+          <div class="search-screen-header">
+            <h2 class="search-screen-title">Busca</h2>
+            <button type="button" class="search-header-action" id="btn-search-fullscreen" title="Alternar tela cheia" aria-label="Alternar tela cheia">
+              <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4"/></svg>
+            </button>
+          </div>
+          <form class="search-bar-wrap" id="search-form" role="search">
+            <input type="search" id="search-input" aria-label="Buscar filmes, séries" autocomplete="off" spellcheck="false" placeholder="Buscar filmes, séries..." />
+            <button type="button" class="search-clear-btn hidden" id="btn-search-clear" title="Limpar busca" aria-label="Limpar busca">✕</button>
+          </form>
+          <div class="recent-searches-wrap hidden" id="recent-searches-wrap"></div>
+          <div class="status-text" id="search-status" role="status"></div>
+          <div class="search-shelves-wrap" id="search-results"></div>
+
+          <div id="discover-section" class="discover-section">
+            <div class="discover-header">
+              <h3 class="discover-heading">Descobrir</h3>
+            </div>
+            <div class="discover-filters-bar">
+              <select id="discover-type-select" class="nuvio-chip-select discover-pill-select" aria-label="Tipo"></select>
+              <select id="discover-catalog-select" class="nuvio-chip-select discover-pill-select" aria-label="Catálogo"></select>
+              <select id="discover-genre-select" class="nuvio-chip-select discover-pill-select" aria-label="Gênero"></select>
+            </div>
+            <div class="discover-context-label" id="discover-context-label"></div>
+            <div class="poster-grid" id="discover-grid" style="margin-top:14px;"></div>
+            <div class="catalog-load-more-wrap">
+              <button class="btn-ghost hidden" id="btn-discover-load-more">Carregar mais</button>
+              <span class="status-text" id="discover-status" role="status"></span>
+            </div>
+          </div>
+        </section>
+
+        <!-- LIBRARY TAB (LibraryScreen.kt) -->
+        <section class="tab-panel padded-page" id="tab-library">
+          <div class="library-top-header">
+            <div>
+              <h2 style="margin:0;">Biblioteca</h2>
+            </div>
+            <div class="row-gap">
+              <button class="nv-mini-btn" id="btn-library-insights" type="button">Insights do perfil</button>
+              <button class="addon-icon-btn" id="btn-library-calendar" title="Calendário de estreias">
+                <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M19 4h-1V2h-2v2H8V2H6v2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2m0 16H5V10h14zM5 8V6h14v2z"/></svg>
+              </button>
+              <button class="addon-icon-btn" id="btn-library-layout" title="Alternar Fileiras / Grade">
+                <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M3 3v8h8V3zm6 6H5V5h4zm-6 4v8h8v-8zm6 6H5v-4h4zm4-16v8h8V3zm6 6h-4V5h4zm-6 4v8h8v-8zm6 6h-4v-4h4z"/></svg>
+              </button>
+              <button class="addon-icon-btn" id="btn-refresh-library" title="Sincronizar biblioteca">
+                <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4z"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="library-source-tabs" role="tablist" aria-label="Seções da biblioteca">
+            <button class="library-source-chip active" data-library-tab="saved" role="tab" aria-selected="true" type="button">Salvo</button>
+            <button class="library-source-chip" data-library-tab="following" role="tab" aria-selected="false" type="button">Seguindo</button>
+          </div>
+
+          <div id="library-panel-saved">
+            <div class="library-controls-row">
+              <select id="library-sort" class="nuvio-chip-select" aria-label="Ordenar biblioteca">
+                <option value="recent">Adicionados recentemente</option>
+                <option value="oldest">Adicionados mais antigos</option>
+                <option value="title">Título A–Z</option>
+                <option value="title_desc">Título Z–A</option>
+              </select>
+              <select id="library-mdblist-list" class="nuvio-chip-select hidden" aria-label="Lista do MDBList"></select>
+            </div>
+            <div id="library-grid" class="library-shelves"></div>
+          </div>
+
+          <div id="library-panel-calendar" hidden>
+            <div id="library-calendar-status" class="muted"></div>
+            <div id="library-calendar"></div>
+          </div>
+
+          <div id="library-panel-following" hidden>
+            <div class="library-controls-row">
+              <select id="following-sort" class="nuvio-chip-select">
+                <option value="recent">Adicionados recentemente</option>
+                <option value="name">Nome (A–Z)</option>
+              </select>
+              <select id="following-filter-role" class="nuvio-chip-select">
+                <option value="all">Função: Todas</option>
+                <option value="actor">Atuação</option>
+                <option value="crew">Direção &amp; Equipe</option>
+              </select>
+            </div>
+            <h3 class="library-section-heading" id="library-following-heading">Elenco</h3>
+            <div id="library-following-grid" class="library-shelves"></div>
+          </div>
+        </section>
+
+        <!-- PROFILE INSIGHTS TAB (Widescreen Desktop Bento Dashboard) -->
+        <section class="tab-panel padded-page" id="tab-insights">
+          <div class="insights-shell" id="insights-shell"></div>
+        </section>
+
+        <!-- SETTINGS TAB (SettingsScreen.kt Hierarchy) -->
+        <section class="tab-panel padded-page" id="tab-settings">
+          <div class="settings-layout">
+            <div class="settings-categories">
+              <h2>Ajustes</h2>
+              <input type="text" id="settings-search-input" placeholder="Buscar ajuste…" class="settings-search-box" />
+              <div class="settings-group-label">Você</div>
+              <button class="settings-cat-btn active" data-settings-sec="account">
+                <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4m0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4"/></svg></span>
+                <span>Conta &amp; Perfis</span>
+              </button>
+              <button class="settings-cat-btn" data-settings-page="group-session" id="btn-open-group-session">
+                <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3m-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3m0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5m8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5"/></svg></span>
+                <span>Sessão em grupo</span>
+              </button>
+              <div class="settings-group-label">Visual</div>
+              <button class="settings-cat-btn" data-settings-sec="appearance">
+                <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M12 3a9 9 0 0 0 0 18c.83 0 1.5-.67 1.5-1.5 0-.39-.15-.74-.39-1.01-.23-.26-.38-.61-.38-.99 0-.83.67-1.5 1.5-1.5H16c2.76 0 5-2.24 5-5 0-4.42-4.03-8-9-8m-5.5 9c-.83 0-1.5-.67-1.5-1.5S5.67 9 6.5 9 8 9.67 8 10.5 7.33 12 6.5 12m3-4C8.67 8 8 7.33 8 6.5S8.67 5 9.5 5s1.5.67 1.5 1.5S10.33 8 9.5 8m5 0c-.83 0-1.5-.67-1.5-1.5S13.67 5 14.5 5s1.5.67 1.5 1.5S15.33 8 14.5 8m3 4c-.83 0-1.5-.67-1.5-1.5S16.67 9 17.5 9s1.5.67 1.5 1.5-.67 1.5-1.5 1.5"/></svg></span>
+                <span>Aparência &amp; Tema</span>
+              </button>
+              <button class="settings-cat-btn" data-settings-sec="layout">
+                <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M4 11h5V5H4zm0 7h5v-6H4zm6 0h5v-6h-5zm6 0h5v-6h-5zm-6-7h5V5h-5zm6-6v6h5V5z"/></svg></span>
+                <span>Layout &amp; Navegação</span>
+              </button>
+              <div class="settings-group-label">Mídia</div>
+              <button class="settings-cat-btn" data-settings-sec="addons">
+                <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M20.5 11H19V7a2 2 0 0 0-2-2h-4V3.5a2.5 2.5 0 0 0-5 0V5H4a2 2 0 0 0-1.99 2v3.8h1.5a2.7 2.7 0 0 1 0 5.4H2V20a2 2 0 0 0 2 2h3.8v-1.5a2.7 2.7 0 0 1 5.4 0V22H17a2 2 0 0 0 2-2v-4h1.5a2.5 2.5 0 0 0 0-5"/></svg></span>
+                <span>Addons</span>
+              </button>
+              <button class="settings-cat-btn" data-settings-sec="plugins">
+                <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="m9.4 16.6-4.6-4.6 4.6-4.6L8 6l-6 6 6 6zm5.2 0 4.6-4.6-4.6-4.6L16 6l6 6-6 6z"/></svg></span>
+                <span>Plugins</span>
+              </button>
+              <button class="settings-cat-btn" data-settings-sec="playback">
+                <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M8 5v14l11-7z"/></svg></span>
+                <span>Mídia</span>
+              </button>
+              <button class="settings-cat-btn" data-settings-sec="collections">
+                <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8z"/></svg></span>
+                <span>Coleções</span>
+              </button>
+              <div class="settings-group-label">Serviços</div>
+              <button class="settings-cat-btn" data-settings-sec="connected">
+                <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1M8 13h8v-2H8zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5"/></svg></span>
+                <span>Integrações</span>
+              </button>
+              <button class="settings-cat-btn" data-settings-sec="simkl">
+                <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46A7.93 7.93 0 0 0 20 12c0-4.42-3.58-8-8-8m0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74A7.93 7.93 0 0 0 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4z"/></svg></span>
+                <span>Rastreamento</span>
+              </button>
+              <div class="settings-group-label">Sistema</div>
+              <button class="settings-cat-btn" data-settings-sec="system">
+                <span class="settings-cat-icon"><svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94s-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.74 8.87a.49.49 0 0 0 .12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 0 0-.12-.61zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6"/></svg></span>
+                <span>Rede &amp; Sistema</span>
+              </button>
+            </div>
+
+            <div class="settings-body">
+              <div class="settings-section active" id="sec-account">
+                <div class="nv-screen-title"><h2>Conta &amp; perfis</h2></div>
+                <div class="nv-group">
+                  <div class="nv-group-label">Conta Nuvio</div>
+                  <div class="nv-sheet">
+                    <div class="nv-row"><span class="nv-copy"><span class="nv-title">Status</span></span><strong class="nv-value nv-strong" id="set-account-status">-</strong></div>
+                    <div class="nv-row"><span class="nv-copy"><span class="nv-title">E-mail</span></span><strong class="nv-value nv-strong" id="set-account-email">-</strong></div>
+                    <div class="nv-row"><span class="nv-copy"><span class="nv-title">Perfil ativo</span></span><strong class="nv-value nv-strong" id="set-account-profile">-</strong></div>
+                  </div>
+                </div>
+                <div class="nv-group">
+                  <div class="nv-group-label">Biblioteca &amp; gosto</div>
+                  <div class="nv-sheet">
+                    <div class="nv-row">
+                      <span class="nv-copy">
+                        <span class="nv-title">Insights do perfil</span>
+                        <span class="nv-desc">Veja a biblioteca ativa, histórico e análise de gosto do perfil selecionado.</span>
+                      </span>
+                      <button class="btn-accent" id="btn-open-profile-insights" type="button">Ver insights</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="nv-actions">
+                  <button class="btn-ghost" id="btn-switch-profile-screen">Trocar perfil</button>
+                  <button class="btn-danger" id="btn-sign-out">Sair da conta</button>
+                </div>
+              </div>
+
+              <div class="settings-section" id="sec-appearance">
+                <div class="nv-screen-title"><h2>Aparência &amp; tema</h2></div>
+                <div class="nv-group">
+                  <div class="nv-group-label">Tela</div>
+                  <div class="nv-sheet">
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">AMOLED Black (preto puro)</span><span class="nv-desc">Fundo preto absoluto (#000000) em telas OLED.</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" id="toggle-amoled" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                  </div>
+                </div>
+                <div class="nv-group">
+                  <div class="nv-group-label">Paleta de tema</div>
+                  <div class="nv-sheet">
+                    <div class="nv-note">Escolha uma paleta predefinida ou personalize as cores.</div>
+                    <div id="theme-swatches"></div>
+                    <div id="custom-theme-editor" class="hidden">
+                      <div class="nv-row">
+                        <span class="nv-copy"><span class="nv-title">Destaque</span></span>
+                        <input type="color" class="nv-color-input" id="custom-color-0" value="#FFFFFF" />
+                      </div>
+                      <div class="nv-row">
+                        <span class="nv-copy"><span class="nv-title">Secundária</span></span>
+                        <input type="color" class="nv-color-input" id="custom-color-1" value="#B8BEC5" />
+                      </div>
+                      <div class="nv-row">
+                        <span class="nv-copy"><span class="nv-title">Sutil</span></span>
+                        <input type="color" class="nv-color-input" id="custom-color-2" value="#6E7178" />
+                      </div>
+                      <div class="nv-actions nv-actions-inset">
+                        <button class="btn-accent" id="btn-apply-custom-theme">Aplicar tema</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-section" id="sec-layout">
+                <div class="nv-screen-title"><h2>Layout &amp; navegação</h2></div>
+                <div class="nv-group">
+                  <div class="nv-group-label">Navegação desktop</div>
+                  <div class="nv-sheet">
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Estilo do menu principal</span><span class="nv-desc">Barra lateral ou barra superior flutuante.</span></span>
+                      <select class="nv-value" id="set-nav-style">
+                        <option value="sidebar">Barra Lateral (Sidebar)</option>
+                        <option value="top_bar">Barra Superior Flutuante</option>
+                      </select>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Comportamento da barra lateral</span><span class="nv-desc">Adaptativa, sempre expandida ou sempre compacta.</span></span>
+                      <select class="nv-value" id="set-nav-mode">
+                        <option value="adaptive">Adaptativa (hover)</option>
+                        <option value="expanded">Sempre expandida</option>
+                        <option value="compact">Sempre compacta</option>
+                      </select>
+                    </label>
+                  </div>
+                </div>
+                <div class="nv-group">
+                  <div class="nv-group-label">Home, detalhes &amp; streams</div>
+                  <div class="nv-sheet">
+                    <label class="nv-row"><span class="nv-copy"><span class="nv-title">Exibir hero banner na Home</span></span><span class="nuvio-switch"><input type="checkbox" id="set-show-hero" /><span class="nuvio-switch-track"></span></span></label>
+                    <label class="nv-row"><span class="nv-copy"><span class="nv-title">Hover preview nos pôsteres</span></span><span class="nuvio-switch"><input type="checkbox" id="set-hover-preview" /><span class="nuvio-switch-track"></span></span></label>
+                    <label class="nv-row"><span class="nv-copy"><span class="nv-title">Desfocar miniaturas de episódios não assistidos</span></span><span class="nuvio-switch"><input type="checkbox" id="set-blur-episodes" /><span class="nuvio-switch-track"></span></span></label>
+                    <label class="nv-row"><span class="nv-copy"><span class="nv-title">Mostrar ícone do addon nos cards de stream</span></span><span class="nuvio-switch"><input type="checkbox" id="set-show-addon-logo" /><span class="nuvio-switch-track"></span></span></label>
+                    <label class="nv-row"><span class="nv-copy"><span class="nv-title">Mostrar badges de qualidade/tamanho nos streams</span></span><span class="nuvio-switch"><input type="checkbox" id="set-show-size-badge" /><span class="nuvio-switch-track"></span></span></label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Estilo de Continuar Assistindo</span></span>
+                      <select class="nv-value" id="set-cw-style">
+                        <option value="card">Card (16:9)</option>
+                        <option value="wide">Largo (Wide)</option>
+                        <option value="poster">Pôster (2:3)</option>
+                      </select>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Fundo da tela de Detalhes</span></span>
+                      <select class="nv-value" id="set-detail-bg-mode">
+                        <option value="cinematic">Cinematográfico</option>
+                        <option value="normal">Normal</option>
+                        <option value="dominant">Cor Dominante</option>
+                      </select>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Fundo da tela de Streams</span></span>
+                      <select class="nv-value" id="set-streams-bg-mode">
+                        <option value="cover">Capa do filme/série</option>
+                        <option value="default">Fundo padrão escuro</option>
+                      </select>
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-section" id="sec-addons">
+                <div class="nv-screen-title"><h2>Addons</h2></div>
+                <div class="nv-group">
+                  <div class="nv-group-label">Visão geral</div>
+                  <div class="nv-sheet nv-stats" id="addons-overview-card">
+                    <div class="addons-stat"><strong id="addons-stat-total">0</strong><span>Addons</span></div>
+                    <div class="addons-stat-divider"></div>
+                    <div class="addons-stat"><strong id="addons-stat-active">0</strong><span>Ativos</span></div>
+                    <div class="addons-stat-divider"></div>
+                    <div class="addons-stat"><strong id="addons-stat-catalogs">0</strong><span>Catálogos</span></div>
+                  </div>
+                </div>
+
+                <div class="nv-group">
+                  <div class="nv-group-label">Adicionar addon</div>
+                  <div class="nv-sheet nv-form">
+                    <div class="nv-form-row">
+                      <input type="text" id="addon-url-input" class="nv-input" placeholder="https://example.com/manifest.json" />
+                      <button class="btn-accent" id="btn-add-addon">Instalar</button>
+                    </div>
+                    <div class="status-text" id="addon-status" style="margin-top:0;"></div>
+                  </div>
+                </div>
+
+                <div class="nv-group">
+                  <div class="nv-group-label">Instalados</div>
+                  <div class="nv-sheet" id="addons-list"></div>
+                </div>
+              </div>
+
+              <div class="settings-section" id="sec-plugins">
+                <div class="nv-screen-title"><h2>Plugins</h2></div>
+                <div class="nv-group">
+                  <div class="nv-group-label">Visão geral</div>
+                  <div class="nv-sheet nv-stats">
+                    <div class="addons-stat"><strong id="plugins-stat-repos">0</strong><span>Repositórios</span></div>
+                    <div class="addons-stat-divider"></div>
+                    <div class="addons-stat"><strong id="plugins-stat-scrapers">0</strong><span>Scrapers</span></div>
+                    <div class="addons-stat-divider"></div>
+                    <div class="addons-stat"><strong id="plugins-stat-enabled">0</strong><span>Ativos</span></div>
+                  </div>
+                </div>
+
+                <div class="nv-group">
+                  <div class="nv-group-label">Plugins</div>
+                  <div class="nv-sheet">
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Ativar plugins</span><span class="nv-desc">Habilita repositórios e scrapers JavaScript.</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" id="toggle-plugins-enabled" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <div class="nv-form">
+                      <div class="nv-form-row">
+                        <input type="text" id="plugin-repo-url-input" class="nv-input" placeholder="https://.../manifest.json" />
+                        <button class="btn-accent" id="btn-add-plugin-repo">Adicionar repo</button>
+                      </div>
+                      <div class="status-text" id="plugin-repo-status"></div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="nv-group">
+                  <div class="nv-group-label">Repositórios instalados</div>
+                  <div class="nv-sheet" id="plugin-repos-list"></div>
+                </div>
+
+                <div class="nv-group">
+                  <div class="nv-group-label">Scrapers</div>
+                  <div class="nv-sheet" id="plugin-scrapers-list"></div>
+                </div>
+              </div>
+
+              <div class="settings-section" id="sec-playback">
+                <div class="nv-screen-title"><h2>Mídia</h2></div>
+
+                <div class="nv-group">
+                  <div class="nv-group-label">Sincronização automática de legenda</div>
+                  <div class="nv-sheet">
+                    <label class="nv-row">
+                      <span class="nv-copy">
+                        <span class="nv-title">Sincronização automática de legenda</span>
+                        <span class="nv-desc">Ajuste a legenda do addon ao tempo das legendas do vídeo.</span>
+                      </span>
+                      <span class="nuvio-switch"><input type="checkbox" data-playback="subtitle_sync" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy">
+                        <span class="nv-title">Busca da sincronização automática: Aprofundada</span>
+                        <span class="nv-desc">Continua comparando outras legendas e faixas incorporadas em busca de uma correspondência mais precisa antes de sincronizar. Apenas correspondências confiáveis são aplicadas.</span>
+                      </span>
+                      <span class="nuvio-switch"><input type="checkbox" data-playback="thorough_sync" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="nv-group">
+                  <div class="nv-group-label">Melhorias de vídeo</div>
+                  <div class="nv-sheet">
+                    <p class="nv-note">Melhorias de vídeo podem aumentar o uso de CPU e GPU. Modos de maior qualidade funcionam melhor em hardware capaz. Se a reprodução engasgar, tente um modo mais leve ou desative as melhorias.</p>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Upscaler de anime</span><span class="nv-desc">Somente anime</span></span>
+                      <select class="nv-value" data-playback="upscale"><option value="off">Desativado</option><option value="anime">Somente anime</option><option value="always">Todos os vídeos</option></select>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Modo de ampliação</span><span class="nv-desc">Suave e claro</span></span>
+                      <select class="nv-value" data-playback="upscale_mode"><option value="light">Leve</option><option value="soft">Suave e claro</option><option value="sharp">Nítido</option></select>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Interpolação de movimento (SVP)</span><span class="nv-desc">Requer SVP Manager em execução e mpv com VapourSynth.</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" data-playback="svp" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Usar configuração personalizada do mpv</span><span class="nv-desc">Aplica sua configuração salva quando o player abre.</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" data-playback="custom_enabled" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row nv-row-stack">
+                      <span class="nv-copy"><span class="nv-title">Configuração personalizada do mpv</span><span class="nv-desc">Defina qualquer opção do mpv, como shaders, filtros, escala, HDR, legendas e cache.</span></span>
+                      <textarea class="nv-input" data-playback="custom_config" rows="5" spellcheck="false" placeholder="scale=ewa_lanczos"></textarea>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="nv-group">
+                  <div class="nv-group-label">Prévias ao navegar no vídeo (Seekr.tv)</div>
+                  <div class="nv-sheet">
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Prévias ao navegar no vídeo</span><span class="nv-desc">Mostra uma faixa de miniaturas ao arrastar a linha do tempo.</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" data-connected-pref="seekr.enabled" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row nv-row-stack">
+                      <span class="nv-copy"><span class="nv-title">Chave de API do Seekr</span><span class="nv-desc">Necessária para buscar as miniaturas no Seekr.tv.</span></span>
+                      <input class="nv-input" type="password" autocomplete="off" placeholder="••••••••" data-connected-pref="seekr.key" />
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Mostrar prévias ao arrastar na linha do tempo</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" data-connected-pref="seekr.drag" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Mostrar prévias ao passar o mouse</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" data-connected-pref="seekr.hover" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Mostrar prévias ao avançar ou voltar pelo teclado</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" data-connected-pref="seekr.keyboard" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Quantidade de miniaturas</span><span class="nv-desc">Miniaturas exibidas na faixa de prévia.</span></span>
+                      <select class="nv-value" data-connected-pref="seekr.count"><option value="1">1</option><option value="3">3</option><option value="5">5</option><option value="7">7</option><option value="9">9</option></select>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Tamanho das prévias</span></span>
+                      <select class="nv-value" data-connected-pref="seekr.size"><option value="75">Pequeno (75%)</option><option value="100">Médio (100%)</option><option value="125">Grande (125%)</option></select>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="nv-group">
+                  <div class="nv-group-label">Player &amp; idiomas</div>
+                  <div class="nv-sheet">
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Abrir sempre no player externo</span><span class="nv-desc">Usa o mpv instalado no sistema em vez do player integrado.</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" id="set-external-player" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Overlay de pausa ("Você está assistindo")</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" id="set-pause-overlay" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Cartão de próximo episódio</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" id="set-next-ep" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Segurar mouse/Espaço para acelerar vídeo</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" id="set-hold-speed" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Velocidade ao segurar</span></span>
+                      <select class="nv-value" id="set-hold-speed-val"><option value="1.5">1.5x</option><option value="2">2.0x</option><option value="2.5">2.5x</option><option value="3">3.0x</option></select>
+                    </label>
+                    <label class="nv-row nv-row-stack">
+                      <span class="nv-copy"><span class="nv-title">Idioma preferido de áudio</span><span class="nv-desc">Código do idioma, por exemplo "por".</span></span>
+                      <input class="nv-input" type="text" id="set-pref-audio" placeholder="por" />
+                    </label>
+                    <label class="nv-row nv-row-stack">
+                      <span class="nv-copy"><span class="nv-title">Idioma preferido de legenda</span><span class="nv-desc">Código do idioma, por exemplo "pt-br".</span></span>
+                      <input class="nv-input" type="text" id="set-pref-sub" placeholder="pt-br" />
+                    </label>
+                    <label class="nv-row nv-row-stack">
+                      <span class="nv-copy"><span class="nv-title">Caminho do player externo</span><span class="nv-desc">Deixe vazio para usar o player integrado.</span></span>
+                      <input class="nv-input" type="text" id="set-mpv-path" placeholder="Automático (player integrado)" />
+                    </label>
+                  </div>
+                </div>
+
+                <div class="nv-group">
+                  <div class="nv-group-label">Pular abertura &amp; segmentos</div>
+                  <div class="nv-sheet">
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Exibir botão "Pular abertura / encerramento"</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" id="set-skip-enabled" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Pular abertura automaticamente</span><span class="nv-desc">Auto-Skip.</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" id="set-autoskip-intro" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Pular recapitulação automaticamente</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" id="set-autoskip-recap" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Pular encerramento / créditos automaticamente</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" id="set-autoskip-outro" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Usar AniSkip para animes</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" id="set-aniskip" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row nv-row-stack">
+                      <span class="nv-copy"><span class="nv-title">URL da API IntroDB</span><span class="nv-desc">Opcional.</span></span>
+                      <input class="nv-input" type="text" id="set-introdb-url" placeholder="https://api.introdb.app" />
+                    </label>
+                    <label class="nv-row nv-row-stack">
+                      <span class="nv-copy"><span class="nv-title">Chave da API IntroDB</span><span class="nv-desc">Opcional, usada para enviar segmentos.</span></span>
+                      <input class="nv-input" type="password" id="set-introdb-key" placeholder="Bearer API Key" />
+                    </label>
+                  </div>
+                </div>
+
+                <div class="nv-group">
+                  <div class="nv-group-label">Aparência padrão das legendas</div>
+                  <div class="nv-sheet">
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Tamanho da fonte</span><span class="nv-desc">Em sp.</span></span>
+                      <input class="nv-value-input" type="number" id="set-sub-size" min="8" max="42" />
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Negrito</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" id="set-sub-bold" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Contorno</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" id="set-sub-outline" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Sombra projetada</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" id="set-sub-shadow" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="nv-actions">
+                  <button class="btn-accent" id="btn-save-settings">Salvar ajustes de reprodução</button>
+                  <span class="status-text" id="settings-status"></span>
+                </div>
+              </div>
+
+              <div class="settings-section" id="sec-connected">
+                <div class="nv-screen-title"><h2>Integrações</h2></div>
+
+                <div class="nv-group">
+                  <div class="nv-group-label">Integrações</div>
+                  <div class="nv-sheet">
+                    <details class="nv-provider">
+                      <summary>
+                        <span class="service-icon"><img src="assets/rating_tmdb.png" alt="" /></span>
+                        <span class="nv-copy"><span class="nv-title">Enriquecimento do TMDB</span><span class="nv-desc">Controles de enriquecimento de metadados</span></span>
+                        <span class="nv-chevron">›</span>
+                      </summary>
+                      <div class="service-fields stack-gap">
+                        <label class="toggle-row"><span>Usar metadados do TMDB</span><span class="nuvio-switch"><input type="checkbox" data-service="tmdb_enabled" /><span class="nuvio-switch-track"></span></span></label>
+                        <label class="field-col">Chave de API do TMDB (também usada pelos plugins JS)<input type="password" id="set-tmdb-key" placeholder="TMDB v3 API Key" /></label>
+                        <label class="toggle-row"><span>Idioma dos metadados</span><select data-service="tmdb_language"><option value="pt-BR">Português (Brasil)</option><option value="en-US">English</option><option value="es-ES">Español</option></select></label>
+                        <label class="toggle-row"><span>Usar título, sinopse e data de estreia</span><span class="nuvio-switch"><input type="checkbox" data-service="tmdb_text" /><span class="nuvio-switch-track"></span></span></label>
+                        <label class="toggle-row"><span>Usar pôster e imagem de fundo</span><span class="nuvio-switch"><input type="checkbox" data-service="tmdb_images" /><span class="nuvio-switch-track"></span></span></label>
+                        <label class="toggle-row"><span>Coleções de filmes</span><span class="nuvio-switch"><input type="checkbox" data-service="tmdb_collections" /><span class="nuvio-switch-track"></span></span></label>
+                        <label class="toggle-row"><span>Títulos semelhantes</span><span class="nuvio-switch"><input type="checkbox" data-service="tmdb_similar" /><span class="nuvio-switch-track"></span></span></label>
+                        <label class="toggle-row"><span>Pôsteres das temporadas</span><span class="nuvio-switch"><input type="checkbox" data-service="tmdb_season_posters" /><span class="nuvio-switch-track"></span></span></label>
+                        <label class="toggle-row"><span>Informações de episódios</span><span class="nuvio-switch"><input type="checkbox" data-service="tmdb_episodes" /><span class="nuvio-switch-track"></span></span></label>
+                        <label class="toggle-row"><span>Emissoras</span><span class="nuvio-switch"><input type="checkbox" data-service="tmdb_networks" /><span class="nuvio-switch-track"></span></span></label>
+                        <label class="toggle-row"><span>Produtoras</span><span class="nuvio-switch"><input type="checkbox" data-service="tmdb_productions" /><span class="nuvio-switch-track"></span></span></label>
+                        <label class="toggle-row"><span>Elenco e personagens</span><span class="nuvio-switch"><input type="checkbox" data-service="tmdb_credits" /><span class="nuvio-switch-track"></span></span></label>
+                        <label class="toggle-row"><span>Trailers</span><span class="nuvio-switch"><input type="checkbox" data-service="tmdb_trailers" /><span class="nuvio-switch-track"></span></span></label>
+                        <label class="toggle-row"><span>Gêneros, duração, idioma e situação</span><span class="nuvio-switch"><input type="checkbox" data-service="tmdb_details" /><span class="nuvio-switch-track"></span></span></label>
+                      </div>
+                    </details>
+                    <details class="nv-provider">
+                      <summary>
+                        <span class="service-icon"><img src="assets/mdblist_logo.svg" alt="" /></span>
+                        <span class="nv-copy"><span class="nv-title">Notas do MDBList</span><span class="nv-desc">Provedores externos de notas</span></span>
+                        <span class="nv-chevron">›</span>
+                      </summary>
+                      <div class="service-fields stack-gap">
+                        <label class="toggle-row"><span>Mostrar notas externas nos detalhes</span><span class="nuvio-switch"><input type="checkbox" data-service="mdblist_enabled" /><span class="nuvio-switch-track"></span></span></label>
+                        <label class="toggle-row"><span>Mostrar notas também no destaque da tela inicial</span><span class="nuvio-switch"><input type="checkbox" data-service="mdblist_hero" /><span class="nuvio-switch-track"></span></span></label>
+                        <label class="field-col">Chave de API do MDBList<input type="password" data-service="mdblist_key" placeholder="Cole sua chave aqui" /></label>
+                        <div class="rating-providers-section">
+                          <div class="nv-group-label rating-providers-heading">PROVEDORES EXTERNOS DE NOTAS</div>
+                          <div id="rating-providers" class="rating-providers-sheet"></div>
+                        </div>
+                      </div>
+                    </details>
+                    <button class="nv-row nv-link-row" id="btn-open-connected-services" type="button">
+                      <span class="nv-copy"><span class="nv-title">Serviços conectados</span><span class="nv-desc">Conecte contas para links e acesso à biblioteca</span></span>
+                      <span class="nv-chevron">›</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="nv-actions">
+                  <span class="status-text" id="services-status" role="status"></span>
+                </div>
+              </div>
+
+              <div class="settings-section" id="sec-cloud">
+                <div class="nv-screen-title nv-title-with-back">
+                  <button class="circle-back-btn" id="btn-cloud-back" title="Voltar" type="button">
+                    <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M15.41 7.41L14 6l-6 6l6 6l1.41-1.41L10.83 12z"/></svg>
+                  </button>
+                  <h2>Serviços conectados</h2>
+                </div>
+
+                <div class="nv-group">
+                  <div class="nv-group-label">Serviços conectados</div>
+                  <div class="nv-sheet">
+                    <p class="nv-note">Estas integrações são experimentais e podem ser mantidas, alteradas ou removidas posteriormente.</p>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Biblioteca na nuvem</span><span class="nv-desc">Navegue e reproduza arquivos que já estão nas suas contas conectadas.</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" data-connected-pref="connected.library" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Resolver links reproduzíveis</span><span class="nv-desc">Solicita links reproduzíveis a um serviço conectado quando um resultado precisar. Isso pode adicionar o item a esse serviço.</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" data-connected-pref="connected.resolve" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="nv-group">
+                  <div class="nv-group-label">Contas</div>
+                  <div class="nv-sheet" id="connected-provider-cards"></div>
+                </div>
+
+                <div class="nv-group">
+                  <div class="nv-sheet">
+                    <details class="nv-details">
+                      <summary>Saiba mais</summary>
+                      <p class="nv-note">Ative a biblioteca na nuvem e abra Biblioteca → Arquivos na nuvem para reproduzir seus vídeos. Para resolver magnets, o player consulta primeiro o Torbox e depois o Premiumize entre as contas conectadas.</p>
+                    </details>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-section" id="sec-simkl">
+                <div class="nv-screen-title"><h2>Rastreamento</h2></div>
+
+                <div class="nv-sheet simkl-hero">
+                  <div class="simkl-brand">SIMKL<sup>™</sup></div>
+                  <strong id="simkl-account">Conta desconectada</strong>
+                  <p class="nv-desc">Conecte o Simkl para sincronizar listas, histórico de visualização, progresso de reprodução e scrobbles.</p>
+                  <label class="field-col" id="simkl-client-field">Client ID do aplicativo Simkl<input id="simkl-client-id" autocomplete="off" placeholder="Client ID" /></label>
+                  <button class="btn-accent nv-wide-btn hidden" id="simkl-sync">↻ Sincronizar agora</button>
+                  <button class="btn-accent nv-wide-btn" id="simkl-connect">Conectar ao Simkl</button>
+                  <span id="simkl-status" class="status-text" role="status"></span>
+                  <div class="simkl-links">
+                    <button id="simkl-open">Acessar o Simkl</button>
+                    <button class="hidden" id="simkl-disconnect">Desconectar</button>
+                    <details class="simkl-how">
+                      <summary>Como funciona a sincronização</summary>
+                      <p class="muted">Escolha abaixo quais dados usar do Simkl neste perfil. A biblioteca salva títulos na lista para assistir. A fonte de progresso lê o histórico e envia a atividade do player integrado para retomar em outros dispositivos. Sincronizar agora atualiza listas, histórico, notas e progresso.</p>
+                    </details>
+                  </div>
+                </div>
+
+                <div class="nv-sheet mdblist-hero">
+                  <div class="mdblist-hero-brand">
+                    <img src="assets/mdblist_logo.svg" alt="MDBList" class="mdblist-hero-icon" />
+                    <strong id="mdblist-account" class="hidden"></strong>
+                  </div>
+                  <p class="nv-desc">Sincronize o histórico de visualização e o progresso de reprodução entre dispositivos</p>
+                  <div class="mdblist-connect-box hidden" id="mdblist-connect-box">
+                    <label class="field-col">Chave de API do MDBList
+                      <div class="mdblist-key-row">
+                        <input id="mdblist-card-key" type="password" autocomplete="off" placeholder="Cole sua MDBList API key" />
+                        <button type="button" class="btn-subtle" id="btn-mdblist-save-key">Salvar</button>
+                      </div>
+                    </label>
+                  </div>
+                  <button class="btn-accent nv-wide-btn mdblist-connect-btn hidden" id="btn-mdblist-sync">↻ Sincronizar MDBList agora</button>
+                  <button class="btn-accent nv-wide-btn mdblist-connect-btn" id="btn-mdblist-connect">Conectar MDBList</button>
+                  <span id="mdblist-card-status" class="status-text" role="status"></span>
+                  <div class="simkl-links">
+                    <button id="btn-mdblist-open">Acessar MDBList</button>
+                    <button class="hidden" id="btn-mdblist-disconnect">Desconectar</button>
+                  </div>
+                </div>
+
+                <div class="nv-group">
+                  <div class="nv-group-label">Fontes</div>
+                  <div class="nv-sheet">
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Fonte da biblioteca</span><span class="nv-desc">Escolha qual biblioteca usar para salvar e visualizar sua coleção (Nuvio, Simkl ou MDBList)</span></span>
+                      <select class="nv-value" id="library-source-select" data-simkl-source="library"><option value="default">Nuvio</option><option value="simkl">Simkl</option><option value="mdblist">MDBList</option></select>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Progresso de reprodução</span><span class="nv-desc">Escolha qual fonte de progresso controla retomar e continuar assistindo (Nuvio, Simkl ou MDBList)</span></span>
+                      <select class="nv-value" id="progress-source-select" data-simkl-source="progress"><option value="default">Nuvio</option><option value="simkl">Simkl</option><option value="mdblist">MDBList</option></select>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Fonte dos títulos semelhantes</span><span class="nv-desc">Escolha de onde vêm as recomendações nas páginas de detalhes</span></span>
+                      <select class="nv-value" data-simkl-source="similar"><option value="default">TMDB</option><option value="simkl">Simkl</option></select>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Notas pessoais</span><span class="nv-desc">Onde suas notas são salvas e exibidas</span></span>
+                      <select class="nv-value" data-simkl-source="ratings"><option value="default">Desativado</option><option value="simkl">Simkl</option></select>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="nv-group">
+                  <div class="nv-group-label">Recursos do Simkl</div>
+                  <div class="nv-sheet">
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Preferência de ID de anime</span><span class="nv-desc">Escolha qual ID externo será usado como identificador principal para animes.</span></span>
+                      <select class="nv-value" data-simkl-source="anime"><option value="tvdb">Preferir TVDB</option><option value="imdb">Preferir IMDb</option><option value="mal">Preferir MyAnimeList</option><option value="kitsu">Preferir Kitsu</option></select>
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-section" id="sec-collections">
+                <div class="nv-screen-title"><h2>Coleções</h2></div>
+                <div class="nv-group">
+                  <div class="nv-group-label">Coleções locais</div>
+                  <div class="nv-sheet nv-form">
+                    <p class="nv-desc">Crie agrupamentos personalizados de catálogos com pastas exibidas na página inicial. Cada pasta aceita capa, logo, emoji e GIF de foco. Cole aqui o JSON de uma coleção ou de uma lista de coleções.</p>
+                    <textarea id="collections-json" class="nv-input" rows="12" spellcheck="false" placeholder='[{"title":"Streaming","folders":[{"title":"Netflix","coverImageUrl":"https://...","focusGifUrl":"https://..."}]}]'></textarea>
+                    <div class="nv-form-row">
+                      <button class="btn-accent" id="btn-save-collections-json">Salvar coleções locais</button>
+                      <button class="btn-ghost" id="btn-reload-account-collections">Recarregar da conta</button>
+                      <button class="btn-danger" id="btn-clear-local-collections">Limpar locais</button>
+                      <span class="status-text" id="collections-settings-status" role="status"></span>
+                    </div>
+                  </div>
+                </div>
+                <div class="nv-group">
+                  <div class="nv-group-label">Da sua conta</div>
+                  <div class="nv-sheet">
+                    <div class="nv-row">
+                      <span class="nv-copy"><span class="nv-title" id="collections-account-count">Carregando…</span><span class="nv-desc">Coleções sincronizadas do perfil Nuvio e exibidas na página inicial.</span></span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-section" id="sec-system">
+                <div class="nv-screen-title"><h2>Rede &amp; Sistema</h2></div>
+                <div class="nv-group">
+                  <div class="nv-group-label">DNS do aplicativo</div>
+                  <div class="nv-sheet">
+                    <label class="nv-row">
+                      <span class="nv-copy">
+                        <span class="nv-title">Servidor DNS</span>
+                        <span class="nv-desc">Usado para addons, catálogos, plugins e metadados. Padrão inicial: Cloudflare (1.1.1.1).</span>
+                      </span>
+                      <select class="nv-value" id="set-dns-provider">
+                        <option value="cloudflare">Cloudflare (1.1.1.1)</option>
+                        <option value="google">Google (8.8.8.8)</option>
+                        <option value="quad9">Quad9 (9.9.9.9)</option>
+                        <option value="adguard">AdGuard DNS</option>
+                        <option value="custom">Personalizado</option>
+                        <option value="system">Sistema (SO)</option>
+                      </select>
+                    </label>
+                    <div class="nv-row nv-row-stack" id="dns-custom-row" hidden>
+                      <label class="field-col">
+                        <span>DNS personalizado (IP ex: 1.1.1.1 ou URL DoH https://...)</span>
+                        <input type="text" id="set-dns-custom" placeholder="https://cloudflare-dns.com/dns-query ou 1.1.1.1" />
+                      </label>
+                      <div class="nv-form-row" style="margin-top:8px;">
+                        <button class="btn-accent" id="btn-save-dns" type="button">Salvar DNS</button>
+                        <span class="status-text" id="dns-status" role="status"></span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="nv-group">
+                  <div class="nv-group-label">Avançado</div>
+                  <div class="nv-sheet">
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Discord Rich Presence</span><span class="nv-desc">Mostra no seu perfil do Discord o que você está navegando ou assistindo. Desativado por padrão.</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" data-service="discord_enabled" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Estilo de presença</span></span>
+                      <select class="nv-value" data-service="discord_style"><option value="watching">Assistindo</option><option value="playing">Jogando</option></select>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Atividade compartilhada</span></span>
+                      <select class="nv-value" data-service="discord_scope"><option value="all">Toda a atividade</option><option value="playback">Somente reprodução</option></select>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Pôster vertical completo</span><span class="nv-desc">Exibe o pôster inteiro no Discord sem cortar em quadrado.</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" data-service="portrait" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Mostrar miniatura do episódio</span><span class="nv-desc">Exibe a imagem do episódio ao lado do pôster no Discord.</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" data-service="episode_image" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <label class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Mostrar nome do episódio</span><span class="nv-desc">Exibe o número e o nome do episódio no Discord. Ao desativar, mostra Assistindo ou Pausado.</span></span>
+                      <span class="nuvio-switch"><input type="checkbox" data-service="episode_name" /><span class="nuvio-switch-track"></span></span>
+                    </label>
+                    <div class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Status da conexão</span><span class="nv-desc" id="discord-presence-status">Desativada.</span></span>
+                      <button class="btn-ghost nv-mini-btn" id="btn-discord-connect" type="button">Conectar agora</button>
+                    </div>
+                    <div class="nv-row">
+                      <span class="nv-copy"><span class="nv-title">Como funciona no PC</span><span class="nv-desc">O Discord não permite login web para status. Abra o Discord, Vesktop ou WebCord no PC e clique em <strong>Conectar agora</strong> (ou use o bridge arRPC se abrir pelo navegador). No Serein, ative Game Activity antes.</span></span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <!-- GROUP SESSION: JOIN BY CODE -->
+  <div id="view-party" class="view">
+    <div class="party-page">
+      <div class="party-page-head">
+        <button class="circle-back-btn" id="btn-party-page-back" title="Voltar" type="button">
+          <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M15.41 7.41L14 6l-6 6l6 6l1.41-1.41L10.83 12z"/></svg>
+        </button>
+        <h1>Sessão em grupo</h1>
+      </div>
+      <div class="party-page-body">
+        <div class="party-page-avatars" aria-hidden="true">
+          <span class="party-page-avatar filled" id="party-page-avatar-self">N</span>
+          <span class="party-page-avatar dashed">+</span>
+          <span class="party-page-avatar dashed">+</span>
+        </div>
+        <h2>Entrar em uma sessão em grupo</h2>
+        <p class="party-page-sub">Insira o código de 6 caracteres que seu amigo compartilhou.</p>
+        <div class="party-code-boxes" id="party-code-boxes">
+          <input class="party-code-box" maxlength="1" autocomplete="off" spellcheck="false" inputmode="text" aria-label="Caractere 1" />
+          <input class="party-code-box" maxlength="1" autocomplete="off" spellcheck="false" inputmode="text" aria-label="Caractere 2" />
+          <input class="party-code-box" maxlength="1" autocomplete="off" spellcheck="false" inputmode="text" aria-label="Caractere 3" />
+          <input class="party-code-box" maxlength="1" autocomplete="off" spellcheck="false" inputmode="text" aria-label="Caractere 4" />
+          <input class="party-code-box" maxlength="1" autocomplete="off" spellcheck="false" inputmode="text" aria-label="Caractere 5" />
+          <input class="party-code-box" maxlength="1" autocomplete="off" spellcheck="false" inputmode="text" aria-label="Caractere 6" />
+        </div>
+        <button class="party-enter-btn" id="btn-party-page-enter" type="button" disabled>Entrar</button>
+        <p class="party-page-error" id="party-page-error" role="status"></p>
+        <p class="party-page-note">As sessões em grupo são experimentais e podem não funcionar como esperado.</p>
+        <p class="party-page-hint">Para ser o anfitrião, inicie uma sessão pelo player.</p>
+        <div class="party-page-active nv-sheet" id="party-page-active" hidden>
+          <div class="nv-row nv-row-stack">
+            <span class="nv-copy"><span class="nv-title">Sala atual</span></span>
+            <span class="nv-desc" id="party-status">Nenhuma sala ativa.</span>
+          </div>
+          <div class="nv-row" id="party-code-row" hidden>
+            <span class="nv-copy"><span class="nv-title">Código da sala</span></span>
+            <span class="nv-title" id="party-code" style="letter-spacing:4px;font-size:20px;"></span>
+          </div>
+          <div class="nv-row nv-row-stack" id="party-members-row" hidden>
+            <span class="nv-copy"><span class="nv-title">Quem está junto</span></span>
+            <span class="nv-desc" id="party-members"></span>
+          </div>
+          <div class="nv-row" id="party-active-row" hidden>
+            <span class="nv-copy"><span class="nv-title">Sair da sala</span></span>
+            <span style="display:flex;gap:8px;">
+              <button class="btn-ghost nv-mini-btn" id="btn-party-leave" type="button">Sair</button>
+              <button class="btn-ghost nv-mini-btn" id="btn-party-end" type="button">Encerrar</button>
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. EMBEDDED IN-APP PLAYER VIEW -->
+  <div id="view-player" class="view">
+    <div class="player-shell" id="player-shell">
+      <div class="player-topbar" id="player-topbar">
+        <div class="player-topbar-left">
+          <button class="circle-back-btn" id="btn-player-back" title="Fechar Player">
+            <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M15.41 7.41L14 6l-6 6l6 6l1.41-1.41L10.83 12z"/></svg>
+          </button>
+          <div>
+            <div class="player-title" id="player-title">Reproduzindo</div>
+            <div class="player-sub" id="player-sub"></div>
+          </div>
+        </div>
+        <div class="player-topbar-right">
+          <select id="player-audio-select" class="player-select" title="Faixa de Áudio"></select>
+          <select id="player-sub-select" class="player-select" title="Legendas"></select>
+          <select id="player-speed-select" class="player-select" title="Velocidade">
+            <option value="0.75">0.75x</option>
+            <option value="1" selected>1.0x</option>
+            <option value="1.25">1.25x</option>
+            <option value="1.5">1.5x</option>
+            <option value="2">2.0x</option>
+          </select>
+          <button class="btn-ghost" id="btn-player-fullscreen" title="Tela Cheia">⛶</button>
+        </div>
+      </div>
+
+      <div class="player-video-stage" id="player-video-stage">
+        <div class="player-stage-status" id="player-stage-status">Iniciando player integrado…</div>
+      </div>
+
+      <div class="player-bottombar" id="player-bottombar">
+        <div class="player-seek-row">
+          <span class="player-time" id="player-time-cur">00:00</span>
+          <input type="range" id="player-seek" min="0" max="100" step="0.5" value="0" class="player-range" />
+          <span class="player-time" id="player-time-dur">00:00</span>
+        </div>
+        <div class="player-controls-row">
+          <div class="row-gap">
+            <button class="btn-ghost" id="btn-player-back10">-10s</button>
+            <button class="btn-accent" id="btn-player-playpause">Pausar</button>
+            <button class="btn-ghost" id="btn-player-fwd10">+10s</button>
+            <span class="muted" id="player-buffer-badge"></span>
+          </div>
+          <div class="row-gap" style="width: 200px;">
+            <span class="muted">Vol</span>
+            <input type="range" id="player-volume" min="0" max="150" value="100" class="player-range" />
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5. GLOBAL OVERLAYS (HOVER PREVIEW, CONTEXT ZOOM MENU, MODALS, TOAST) -->
+  <div id="hover-preview-popup" class="hover-preview-popup hidden"></div>
+
+  <div id="poster-context-overlay" class="context-zoom-backdrop hidden">
+    <div class="context-zoom-card" id="poster-context-card"></div>
+  </div>
+
+  <div class="modal-backdrop hidden" id="plugin-settings-modal">
+    <div class="small-modal plugin-settings-modal">
+      <h3 id="plugin-settings-title">Configurações do provedor</h3>
+      <div class="plugin-settings-body" id="plugin-settings-body"></div>
+      <div class="row-gap" style="justify-content:flex-end;">
+        <button class="btn-ghost" id="btn-plugin-settings-cancel" type="button">Cancelar</button>
+        <button class="btn-accent" id="btn-plugin-settings-save" type="button">Salvar</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop hidden" id="nuvio-confirm-modal">
+    <div class="small-modal">
+      <h3 id="confirm-modal-title">Confirmar</h3>
+      <p class="muted" id="confirm-modal-msg"></p>
+      <div class="row-gap" style="justify-content:flex-end;">
+        <button class="btn-ghost" id="btn-confirm-no">Não</button>
+        <button class="btn-danger" id="btn-confirm-yes">Sim</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop hidden" id="custom-server-modal">
+    <div class="small-modal">
+      <h3>Servidor Customizado</h3>
+      <p class="muted">Informe a URL da sua instância auto-hospedada do Nuvio</p>
+      <input type="url" id="custom-server-input" placeholder="https://nuvio.exemplo.com" />
+      <div class="auth-error hidden" id="custom-server-error"></div>
+      <div class="row-gap" style="justify-content:flex-end;">
+        <button class="btn-ghost" id="btn-custom-server-cancel">Cancelar</button>
+        <button class="btn-accent" id="btn-custom-server-connect">Conectar</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-host" class="toast-host"></div>
+
+  <script src="webos-qr.js"></script>
+  <script src="webos-bridge.js"></script>
+  <script src="webos-tv.js"></script>
+  <script src="subtitle-sync.js"></script>
+  <script src="metadata.js"></script>
+  <script src="simkl.js"></script>
+  <script src="player-ui/seek-preview.js"></script>
+  <script src="connected.js"></script>
+  <script src="app.js"></script>
+  <script src="insights.js"></script>
+  <script src="collections.js"></script>
+</body>
+</html>

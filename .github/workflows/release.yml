@@ -54,8 +54,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build Windows release executable
-        run: cargo build --release -p nuvio-desktop
       - name: Fetch Windows libmpv runtime
         shell: pwsh
         run: |
@@ -69,19 +67,18 @@ jobs:
           Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "$env:TEMP\mpv-dev.7z"
           7z e "$env:TEMP\mpv-dev.7z" "libmpv-2.dll" -o"dist-win" -r -y
           if (-not (Test-Path "dist-win\libmpv-2.dll")) { throw "libmpv-2.dll extraction failed" }
+      - name: Build Windows release executable
+        env:
+          NUVIO_EMBED_LIBMPV_PATH: ${{ github.workspace }}\dist-win\libmpv-2.dll
+        run: cargo build --release -p nuvio-desktop
       - name: Prepare Windows artifact
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist-win | Out-Null
           Copy-Item target/release/nuvio-desktop.exe dist-win/NuvioDesktop-Rust.exe
-          Compress-Archive -Path dist-win/NuvioDesktop-Rust.exe, dist-win/libmpv-2.dll -DestinationPath dist-win/NuvioDesktop-Rust-Windows-x86_64.zip -Force
       - uses: actions/upload-artifact@v4
         with:
           name: NuvioDesktop-Rust-Windows-Exe
-          path: |
-            dist-win/NuvioDesktop-Rust.exe
-            dist-win/libmpv-2.dll
-            dist-win/NuvioDesktop-Rust-Windows-x86_64.zip
+          path: dist-win/NuvioDesktop-Rust.exe
 
   release:
     needs: [build-linux, build-windows]
@@ -103,5 +100,3 @@ jobs:
           files: |
             release-assets/NuvioDesktop-Rust-x86_64.AppImage
             release-assets/NuvioDesktop-Rust.exe
-            release-assets/libmpv-2.dll
-            release-assets/NuvioDesktop-Rust-Windows-x86_64.zip

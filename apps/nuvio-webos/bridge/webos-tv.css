@@ -1,0 +1,87 @@
+/* LG webOS 10-foot TV adaptations (applied strictly inside nuvio-webos target) */
+body.webos-tv {
+  user-select: none;
+  cursor: none;
+}
+
+body.webos-tv input,
+body.webos-tv select,
+body.webos-tv textarea {
+  user-select: text;
+  cursor: auto;
+}
+
+body.webos-tv .tv-focused,
+body.webos-tv button:focus-visible,
+body.webos-tv .poster-card:focus,
+body.webos-tv .cw-card:focus,
+body.webos-tv .nav-item:focus,
+body.webos-tv .settings-cat-btn:focus,
+body.webos-tv .stream-row:focus,
+body.webos-tv .episode-card:focus {
+  outline: 3px solid var(--focus-ring, #ffffff) !important;
+  outline-offset: 3px;
+  box-shadow: 0 0 0 6px rgba(255, 255, 255, 0.14);
+}
+
+body.webos-tv .poster-card.tv-focused,
+body.webos-tv .cw-card.tv-focused {
+  transform: scale(1.04);
+  z-index: 5;
+}
+
+/* HTML5 Video surface inside #player-video-stage */
+.webos-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000000;
+  z-index: 0;
+}
+
+body.webos-tv #player-shell .player-stage-status {
+  position: relative;
+  z-index: 2;
+  pointer-events: none;
+}
+
+/* Hide PC-only controls in TV UI */
+body.webos-tv #btn-player-fullscreen,
+body.webos-tv [data-settings-sec="system"],
+body.webos-tv [data-service="discord_enabled"],
+body.webos-tv #btn-diag {
+  display: none !important;
+}
+
+/* QR Code display cards for effortless TV login */
+.webos-qr-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 12px;
+}
+.webos-qr-box {
+  background: #ffffff;
+  padding: 10px;
+  border-radius: 16px;
+  line-height: 0;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+.webos-qr-box svg {
+  display: block;
+}
+.webos-qr-caption {
+  font-size: 13px;
+  color: var(--text-secondary, #b8bec5);
+  text-align: center;
+}
+.webos-conn-qr {
+  padding: 6px 24px 14px;
+}
+.webos-qr-modal-box {
+  display: flex;
+  justify-content: center;
+}

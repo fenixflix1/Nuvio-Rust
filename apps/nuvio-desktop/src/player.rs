@@ -15,10 +15,13 @@ use std::sync::{Arc, Mutex};
 use tauri::Manager;
 use tauri::{AppHandle, Emitter, WebviewWindow};
 
+const MPV_FORMAT_NONE: c_int = 0;
 const MPV_FORMAT_STRING: c_int = 1;
 const MPV_FORMAT_FLAG: c_int = 3;
 const MPV_FORMAT_INT64: c_int = 4;
 const MPV_FORMAT_DOUBLE: c_int = 5;
+const MPV_FORMAT_NODE: c_int = 6;
+const MPV_FORMAT_NODE_ARRAY: c_int = 7;
 
 const MPV_EVENT_NONE: c_int = 0;
 const MPV_EVENT_SHUTDOWN: c_int = 1;
@@ -26,6 +29,7 @@ const MPV_EVENT_COMMAND_REPLY: c_int = 5;
 const MPV_EVENT_START_FILE: c_int = 6;
 const MPV_EVENT_END_FILE: c_int = 7;
 const MPV_EVENT_PLAYBACK_RESTART: c_int = 21;
+const MPV_EVENT_PROPERTY_CHANGE: c_int = 22;
 
 #[repr(C)]
 struct MpvEvent {
@@ -33,6 +37,37 @@ struct MpvEvent {
     error: c_int,
     reply_userdata: u64,
     data: *mut c_void,
+}
+
+#[repr(C)]
+struct MpvEventProperty {
+    name: *const c_char,
+    format: c_int,
+    data: *mut c_void,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+union MpvNodeValue {
+    string: *const c_char,
+    flag: c_int,
+    int64: i64,
+    double_: c_double,
+    list: *mut MpvNodeList,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MpvNode {
+    u: MpvNodeValue,
+    format: c_int,
+}
+
+#[repr(C)]
+struct MpvNodeList {
+    num: c_int,
+    values: *mut MpvNode,
+    keys: *mut *mut c_char,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -129,6 +164,8 @@ pub struct SubtitleStylePayload {
 type MpvCreateFn = unsafe extern "C" fn() -> *mut c_void;
 type MpvLoadConfigFn = unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int;
 type MpvInitializeFn = unsafe extern "C" fn(*mut c_void) -> c_int;
+type MpvSetOptionFn =
+    unsafe extern "C" fn(*mut c_void, *const c_char, c_int, *mut c_void) -> c_int;
 type MpvSetOptionStringFn =
     unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> c_int;
 type MpvCommandFn = unsafe extern "C" fn(*mut c_void, *const *const c_char) -> c_int;
@@ -137,6 +174,8 @@ type MpvSetPropertyStringFn =
     unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> c_int;
 type MpvGetPropertyFn =
     unsafe extern "C" fn(*mut c_void, *const c_char, c_int, *mut c_void) -> c_int;
+type MpvObservePropertyFn =
+    unsafe extern "C" fn(*mut c_void, u64, *const c_char, c_int) -> c_int;
 type MpvWaitEventFn = unsafe extern "C" fn(*mut c_void, c_double) -> *const MpvEvent;
 type MpvWakeupFn = unsafe extern "C" fn(*mut c_void);
 type MpvFreeFn = unsafe extern "C" fn(*mut c_void);
@@ -148,16 +187,20 @@ struct MpvApi {
     create: MpvCreateFn,
     initialize: MpvInitializeFn,
     load_config: MpvLoadConfigFn,
+    set_option: MpvSetOptionFn,
     set_option_string: MpvSetOptionStringFn,
     command: MpvCommandFn,
     command_async: MpvCommandAsyncFn,
     set_property_string: MpvSetPropertyStringFn,
     get_property: MpvGetPropertyFn,
+    observe_property: MpvObservePropertyFn,
     wait_event: MpvWaitEventFn,
     wakeup: MpvWakeupFn,
     free: MpvFreeFn,
     terminate_destroy: MpvTerminateDestroyFn,
 }
+
+include!(concat!(env!("OUT_DIR"), "/embedded_libmpv.rs"));
 
 impl MpvApi {
     fn load() -> Result<Self, String> {
@@ -176,20 +219,28 @@ impl MpvApi {
                 candidates.push(exe_dir.join("runtime").join("libmpv-2.dll").into_os_string());
                 candidates.push(exe_dir.join("native").join("libmpv-2.dll").into_os_string());
             }
+            if let Some(gz_bytes) = EMBEDDED_LIBMPV_GZ
+                && let Ok(extracted) = ensure_embedded_windows_libmpv(gz_bytes)
+            {
+                candidates.push(extracted.into_os_string());
+            }
             candidates.push("libmpv-2.dll".into());
             candidates.push("mpv-2.dll".into());
             candidates.push(r"C:\Program Files (x86)\Nuvio\app\native\libmpv-2.dll".into());
             candidates.push(r"C:\Program Files\Nuvio\app\native\libmpv-2.dll".into());
             candidates.push(r"C:\msys64\ucrt64\bin\libmpv-2.dll".into());
         } else if cfg!(target_os = "macos") {
+            let _ = EMBEDDED_LIBMPV_GZ;
             candidates.push("libmpv.2.dylib".into());
             candidates.push("libmpv.dylib".into());
         } else {
+            let _ = EMBEDDED_LIBMPV_GZ;
             candidates.push("libmpv.so.2".into());
             candidates.push("libmpv.so".into());
         }
 
         let mut last_err = String::new();
+        crate::crash_log::note("player: a carregar libmpv");
         for name in &candidates {
             match unsafe { Library::new(name) } {
                 Ok(lib) => unsafe {
@@ -197,6 +248,8 @@ impl MpvApi {
                         lib.get(b"mpv_create\0").map_err(|e| e.to_string())?;
                     let initialize: Symbol<MpvInitializeFn> =
                         lib.get(b"mpv_initialize\0").map_err(|e| e.to_string())?;
+                    let set_option: Symbol<MpvSetOptionFn> =
+                        lib.get(b"mpv_set_option\0").map_err(|e| e.to_string())?;
                     let set_option_string: Symbol<MpvSetOptionStringFn> = lib
                         .get(b"mpv_set_option_string\0")
                         .map_err(|e| e.to_string())?;
@@ -209,6 +262,9 @@ impl MpvApi {
                         .map_err(|e| e.to_string())?;
                     let get_property: Symbol<MpvGetPropertyFn> =
                         lib.get(b"mpv_get_property\0").map_err(|e| e.to_string())?;
+                    let observe_property: Symbol<MpvObservePropertyFn> = lib
+                        .get(b"mpv_observe_property\0")
+                        .map_err(|e| e.to_string())?;
                     let wait_event: Symbol<MpvWaitEventFn> =
                         lib.get(b"mpv_wait_event\0").map_err(|e| e.to_string())?;
                     let wakeup: Symbol<MpvWakeupFn> =
@@ -219,17 +275,23 @@ impl MpvApi {
                         .get(b"mpv_terminate_destroy\0")
                         .map_err(|e| e.to_string())?;
 
+                    crate::crash_log::note(&format!(
+                        "player: libmpv carregada de {}",
+                        name.to_string_lossy()
+                    ));
                     return Ok(Self {
                         create: *create,
                         initialize: *initialize,
                         load_config: *lib
                             .get::<MpvLoadConfigFn>(b"mpv_load_config_file\0")
                             .map_err(|e| e.to_string())?,
+                        set_option: *set_option,
                         set_option_string: *set_option_string,
                         command: *command,
                         command_async: *command_async,
                         set_property_string: *set_property_string,
                         get_property: *get_property,
+                        observe_property: *observe_property,
                         wait_event: *wait_event,
                         wakeup: *wakeup,
                         free: *free,
@@ -240,7 +302,79 @@ impl MpvApi {
                 Err(e) => last_err = e.to_string(),
             }
         }
+        crate::crash_log::note(&format!("player: falha ao carregar libmpv: {last_err}"));
         Err(format!("Failed to load libmpv: {last_err}"))
+    }
+}
+
+fn ensure_embedded_windows_libmpv(gz_bytes: &[u8]) -> Result<std::path::PathBuf, String> {
+    let base_dir = std::env::var_os("LOCALAPPDATA")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let runtime_dir = base_dir
+        .join("NuvioDesktop")
+        .join("runtime")
+        .join(env!("CARGO_PKG_VERSION"));
+    decompress_embedded_libmpv_to(gz_bytes, &runtime_dir)
+}
+
+fn decompress_embedded_libmpv_to(
+    gz_bytes: &[u8],
+    runtime_dir: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+
+    std::fs::create_dir_all(runtime_dir).map_err(|e| e.to_string())?;
+    let dll_path = runtime_dir.join("libmpv-2.dll");
+    let marker_path = runtime_dir.join(".gz-len");
+    let expected_marker = gz_bytes.len().to_string();
+
+    if let Ok(meta) = std::fs::metadata(&dll_path)
+        && meta.len() > 0
+        && std::fs::read_to_string(&marker_path).ok().as_deref() == Some(expected_marker.as_str())
+    {
+        return Ok(dll_path);
+    }
+
+    let tmp_path = runtime_dir.join(format!("libmpv-2.{}.tmp", std::process::id()));
+    let mut decoder = GzDecoder::new(gz_bytes);
+    let mut out = Vec::new();
+    decoder.read_to_end(&mut out).map_err(|e| e.to_string())?;
+    std::fs::write(&tmp_path, &out).map_err(|e| e.to_string())?;
+    if let Err(err) = std::fs::rename(&tmp_path, &dll_path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        if !dll_path.exists() {
+            return Err(err.to_string());
+        }
+    }
+    let _ = std::fs::write(&marker_path, expected_marker);
+    Ok(dll_path)
+}
+
+#[cfg(test)]
+mod embedded_libmpv_tests {
+    use super::decompress_embedded_libmpv_to;
+    use flate2::{Compression, write::GzEncoder};
+    use std::io::Write;
+
+    #[test]
+    fn extracts_gzipped_libmpv_once_and_reuses_cached_file() {
+        let mut enc = GzEncoder::new(Vec::new(), Compression::fast());
+        enc.write_all(b"MZ_FAKE_DLL_BYTES").unwrap();
+        let gz = enc.finish().unwrap();
+
+        let dir = std::env::temp_dir().join(format!("nuvio-mpv-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let first = decompress_embedded_libmpv_to(&gz, &dir).unwrap();
+        assert_eq!(std::fs::read(&first).unwrap(), b"MZ_FAKE_DLL_BYTES");
+
+        let second = decompress_embedded_libmpv_to(&gz, &dir).unwrap();
+        assert_eq!(first, second);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -407,15 +541,17 @@ mod platform_host {
 mod platform_host {
     use libloading::{Library, Symbol};
     use std::os::raw::{c_int, c_void};
+    use std::sync::Arc;
+    use tauri::{AppHandle, WebviewWindow};
 
     const WS_CHILD: u32 = 0x40000000;
     const WS_VISIBLE: u32 = 0x10000000;
     const WS_CLIPCHILDREN: u32 = 0x02000000;
-    const WS_CLIPSIBLINGS: u32 = 0x04000000;
     const HWND_TOP: isize = 0;
     const SWP_NOACTIVATE: u32 = 0x0010;
     const SWP_SHOWWINDOW: u32 = 0x0040;
     const SWP_NOCOPYBITS: u32 = 0x0100;
+    const SWP_ASYNCWINDOWPOS: u32 = 0x4000;
 
     type CreateWindowExWFn = unsafe extern "system" fn(
         u32,
@@ -434,9 +570,24 @@ mod platform_host {
     type SetWindowPosFn =
         unsafe extern "system" fn(isize, isize, c_int, c_int, c_int, c_int, u32) -> c_int;
     type DestroyWindowFn = unsafe extern "system" fn(isize) -> c_int;
+    type GetWindowThreadProcessIdFn = unsafe extern "system" fn(isize, *mut u32) -> u32;
+    type GetCurrentThreadIdFn = unsafe extern "system" fn() -> u32;
+
+    fn current_thread_id() -> u32 {
+        unsafe {
+            if let Ok(k32) = Library::new("kernel32.dll")
+                && let Ok(get_tid) = k32.get::<GetCurrentThreadIdFn>(b"GetCurrentThreadId\0")
+            {
+                return get_tid();
+            }
+        }
+        0
+    }
 
     pub struct ChildSurface {
-        _user32: Library,
+        _user32: Arc<Library>,
+        app: AppHandle,
+        owner_tid: u32,
         hwnd: isize,
         set_window_pos: SetWindowPosFn,
         destroy_window: DestroyWindowFn,
@@ -445,9 +596,57 @@ mod platform_host {
     unsafe impl Send for ChildSurface {}
 
     impl ChildSurface {
-        pub fn create(parent_hwnd: isize, x: i32, y: i32, w: u32, h: u32) -> Result<Self, String> {
+        pub fn create(
+            app: &AppHandle,
+            window: &WebviewWindow,
+            parent_hwnd: isize,
+            x: i32,
+            y: i32,
+            w: u32,
+            h: u32,
+        ) -> Result<Self, String> {
+            let user32 = Arc::new(Library::new("user32.dll").map_err(|e| e.to_string())?);
+            let owner_tid = unsafe {
+                let get_win_tid: Symbol<GetWindowThreadProcessIdFn> = user32
+                    .get(b"GetWindowThreadProcessId\0")
+                    .map_err(|e| e.to_string())?;
+                get_win_tid(parent_hwnd, std::ptr::null_mut())
+            };
+            let app_clone = app.clone();
+            if owner_tid != 0 && current_thread_id() != owner_tid {
+                let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                let user32_c = Arc::clone(&user32);
+                window
+                    .run_on_main_thread(move || {
+                        let res = Self::create_on_owner_thread(
+                            user32_c,
+                            app_clone,
+                            parent_hwnd,
+                            x,
+                            y,
+                            w,
+                            h,
+                        );
+                        let _ = tx.send(res);
+                    })
+                    .map_err(|e| e.to_string())?;
+                return rx
+                    .recv()
+                    .map_err(|_| "Main thread dropped ChildSurface creation".to_string())?;
+            }
+            Self::create_on_owner_thread(user32, app_clone, parent_hwnd, x, y, w, h)
+        }
+
+        fn create_on_owner_thread(
+            user32: Arc<Library>,
+            app: AppHandle,
+            parent_hwnd: isize,
+            x: i32,
+            y: i32,
+            w: u32,
+            h: u32,
+        ) -> Result<Self, String> {
             unsafe {
-                let user32 = Library::new("user32.dll").map_err(|e| e.to_string())?;
                 let create_win: Symbol<CreateWindowExWFn> = user32
                     .get(b"CreateWindowExW\0")
                     .map_err(|e| e.to_string())?;
@@ -462,11 +661,12 @@ mod platform_host {
                 let title: Vec<u16> = "NuvioVideo\0".encode_utf16().collect();
                 let cw = w.max(16) as c_int;
                 let ch = h.max(16) as c_int;
+                // Omit WS_CLIPSIBLINGS so DWM never clips the video HWND into a white/black box against sibling WebView windows.
                 let hwnd = create_win(
                     0,
                     class_name.as_ptr(),
                     title.as_ptr(),
-                    WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+                    WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
                     x,
                     y,
                     cw,
@@ -490,6 +690,8 @@ mod platform_host {
                 );
                 Ok(Self {
                     hwnd,
+                    app,
+                    owner_tid: current_thread_id(),
                     set_window_pos: *set_window_pos,
                     destroy_window: *destroy_window,
                     _user32: user32,
@@ -514,7 +716,7 @@ mod platform_host {
                     y,
                     w.max(16) as c_int,
                     h.max(16) as c_int,
-                    SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_NOCOPYBITS,
+                    SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_NOCOPYBITS | SWP_ASYNCWINDOWPOS,
                 );
             }
         }
@@ -522,8 +724,20 @@ mod platform_host {
 
     impl Drop for ChildSurface {
         fn drop(&mut self) {
-            unsafe {
-                (self.destroy_window)(self.hwnd);
+            if self.owner_tid == 0 || current_thread_id() == self.owner_tid {
+                unsafe {
+                    (self.destroy_window)(self.hwnd);
+                }
+            } else {
+                let hwnd = self.hwnd;
+                let destroy = self.destroy_window;
+                let user32 = Arc::clone(&self._user32);
+                let _ = self.app.run_on_main_thread(move || {
+                    let _keep_user32 = user32;
+                    unsafe {
+                        (destroy)(hwnd);
+                    }
+                });
             }
         }
     }
@@ -551,7 +765,6 @@ struct ActiveSession {
     handle: *mut c_void,
     surface: platform_host::ChildSurface,
     stop_flag: Arc<AtomicBool>,
-    first_frame_shown: Arc<AtomicBool>,
     ended_flag: Arc<AtomicBool>,
     #[cfg(target_os = "linux")]
     overlay_shared: Arc<LinuxOverlayShared>,
@@ -699,9 +912,15 @@ impl EmbeddedPlayer {
                 create_surface_for_linux(raw, rect)?
             }
             #[cfg(target_os = "windows")]
-            RawWindowHandle::Win32(h) => {
-                platform_host::ChildSurface::create(h.hwnd.get(), rect.x, rect.y, rect.w, rect.h)?
-            }
+            RawWindowHandle::Win32(h) => platform_host::ChildSurface::create(
+                &app,
+                window,
+                h.hwnd.get(),
+                rect.x,
+                rect.y,
+                rect.w,
+                rect.h,
+            )?,
             other => {
                 return Err(format!(
                     "Window handle {:?} is not X11/Win32 (set GDK_BACKEND=x11 on Wayland)",
@@ -810,7 +1029,7 @@ impl EmbeddedPlayer {
         };
 
         let stop_clone = Arc::clone(&stop_flag);
-        let first_clone = Arc::clone(&first_frame_shown);
+        let first_clone = first_frame_shown;
         let ended_clone = Arc::clone(&ended_flag);
         #[cfg(target_os = "linux")]
         let shared_loop = Arc::clone(&overlay_shared);
@@ -821,7 +1040,6 @@ impl EmbeddedPlayer {
             handle,
             surface,
             stop_flag,
-            first_frame_shown,
             ended_flag,
             #[cfg(target_os = "linux")]
             overlay_shared,
@@ -832,20 +1050,51 @@ impl EmbeddedPlayer {
             event_thread: None,
         });
 
+        observe_player_properties(&api, handle);
+
         let api_evt = api.clone();
         let handle_addr_evt = handle as usize;
         let evt_jh = std::thread::spawn(move || {
-            let mut last_tick = std::time::Instant::now()
-                .checked_sub(std::time::Duration::from_millis(250))
+            const CONTINUOUS_EMIT_INTERVAL: std::time::Duration =
+                std::time::Duration::from_millis(200);
+            let mut cached = CachedPlayerState::default();
+            let mut last_emit = std::time::Instant::now()
+                .checked_sub(CONTINUOUS_EMIT_INTERVAL)
                 .unwrap_or_else(std::time::Instant::now);
+            let mut pending_continuous = false;
 
             while !stop_clone.load(Ordering::Relaxed) {
                 let h_ptr = handle_addr_evt as *mut c_void;
+                let wait_timeout = if pending_continuous {
+                    let elapsed = last_emit.elapsed();
+                    if elapsed >= CONTINUOUS_EMIT_INTERVAL {
+                        0.0
+                    } else {
+                        (CONTINUOUS_EMIT_INTERVAL - elapsed)
+                            .as_secs_f64()
+                            .max(0.005)
+                    }
+                } else {
+                    -1.0
+                };
+
+                let mut dirty_discrete = false;
+                let mut dirty_continuous = false;
+                let mut tracks_dirty = false;
+                let mut chapters_dirty = false;
+                let mut first_wait = true;
+
                 loop {
                     if stop_clone.load(Ordering::Relaxed) {
                         break;
                     }
-                    let ev_ptr = unsafe { (api_evt.wait_event)(h_ptr, 0.03) };
+                    let timeout = if first_wait {
+                        first_wait = false;
+                        wait_timeout
+                    } else {
+                        0.0
+                    };
+                    let ev_ptr = unsafe { (api_evt.wait_event)(h_ptr, timeout) };
                     if ev_ptr.is_null() {
                         break;
                     }
@@ -857,17 +1106,30 @@ impl EmbeddedPlayer {
                         MPV_EVENT_START_FILE => {
                             first_clone.store(false, Ordering::Relaxed);
                             ended_clone.store(false, Ordering::Relaxed);
+                            dirty_discrete = true;
                         }
                         MPV_EVENT_PLAYBACK_RESTART => {
                             first_clone.store(true, Ordering::Relaxed);
+                            dirty_discrete = true;
                         }
                         MPV_EVENT_END_FILE => {
                             ended_clone.store(true, Ordering::Relaxed);
+                            dirty_discrete = true;
                         }
                         MPV_EVENT_COMMAND_REPLY => {
                             #[cfg(target_os = "linux")]
                             if (ev.reply_userdata >> 32) == OVERLAY_REPLY_TAG {
                                 shared_loop.mark_overlay_done(ev.reply_userdata & 0xffff_ffff);
+                            }
+                        }
+                        MPV_EVENT_PROPERTY_CHANGE => {
+                            if !ev.data.is_null() {
+                                let prop = unsafe { &*(ev.data as *const MpvEventProperty) };
+                                let change = cached.apply_property_event(ev.reply_userdata, prop);
+                                tracks_dirty |= change.tracks_dirty;
+                                chapters_dirty |= change.chapters_dirty;
+                                dirty_discrete |= change.discrete;
+                                dirty_continuous |= change.continuous;
                             }
                         }
                         MPV_EVENT_SHUTDOWN => {
@@ -882,32 +1144,58 @@ impl EmbeddedPlayer {
                     break;
                 }
 
-                if last_tick.elapsed() >= std::time::Duration::from_millis(200) {
-                    last_tick = std::time::Instant::now();
-                    let guard = session_arc.lock().expect("player mutex");
-                    let Some(sess) = guard.as_ref() else {
-                        break;
-                    };
-                    let ff = sess.first_frame_shown.load(Ordering::Relaxed);
-                    let ended = sess.ended_flag.load(Ordering::Relaxed);
-                    let (payload, update_js) = read_player_state(&sess.api, sess.handle, ff, ended);
+                if tracks_dirty {
+                    cached.refresh_tracks(&api_evt, h_ptr);
+                    dirty_discrete = true;
+                }
+                if chapters_dirty {
+                    cached.refresh_chapters(&api_evt, h_ptr);
+                    dirty_discrete = true;
+                }
 
-                    #[cfg(target_os = "linux")]
-                    {
-                        sess.overlay_shared
-                            .loading
-                            .store(payload.loading, Ordering::Relaxed);
-                        sess.overlay_shared
-                            .paused
-                            .store(payload.paused, Ordering::Relaxed);
-                        if let Some(ref ov) = sess.overlay_handle {
-                            ov.push_update_js(update_js);
-                        }
+                let should_emit = if dirty_discrete {
+                    true
+                } else if dirty_continuous || pending_continuous {
+                    if last_emit.elapsed() >= CONTINUOUS_EMIT_INTERVAL {
+                        true
+                    } else {
+                        pending_continuous = true;
+                        false
                     }
+                } else {
+                    false
+                };
 
-                    #[cfg(target_os = "windows")]
-                    if let Some(ref win_ov) = sess.win_overlay {
-                        let _ = win_ov.eval(&update_js);
+                if should_emit {
+                    last_emit = std::time::Instant::now();
+                    pending_continuous = false;
+                    let ff = first_clone.load(Ordering::Relaxed);
+                    let ended = ended_clone.load(Ordering::Relaxed);
+                    let (payload, update_js) = cached.build_payload_and_js(ff, ended);
+
+                    {
+                        let guard = session_arc.lock().expect("player mutex");
+                        let Some(sess) = guard.as_ref() else {
+                            break;
+                        };
+
+                        #[cfg(target_os = "linux")]
+                        {
+                            sess.overlay_shared
+                                .loading
+                                .store(payload.loading, Ordering::Relaxed);
+                            sess.overlay_shared
+                                .paused
+                                .store(payload.paused, Ordering::Relaxed);
+                            if let Some(ref ov) = sess.overlay_handle {
+                                ov.push_update_js(update_js);
+                            }
+                        }
+
+                        #[cfg(target_os = "windows")]
+                        if let Some(ref win_ov) = sess.win_overlay {
+                            let _ = win_ov.eval(&update_js);
+                        }
                     }
 
                     let _ = app.emit("player:state", payload);
@@ -1330,7 +1618,11 @@ fn create_windows_overlay(
     .map_err(|e| e.to_string())?
     .initialization_script(init_script)
     .build()
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| {
+        crate::crash_log::note(&format!("player: falha ao criar overlay Windows: {e}"));
+        e.to_string()
+    })?;
+    crate::crash_log::note("player: overlay Windows criado");
     let _ = ov.set_position(pos);
     let _ = ov.set_size(size);
     let _ = ov.set_focus();
@@ -1390,7 +1682,7 @@ fn create_and_init_mpv(
     ];
     #[cfg(target_os = "windows")]
     let attempts: &[(&str, &str, &str)] = &[
-        ("gpu-next,gpu,", "auto", "auto"),
+        ("gpu-next,gpu", "auto", "auto"),
         ("gpu", "d3d11", "d3d11va"),
         ("gpu", "win", "auto"),
     ];
@@ -1438,17 +1730,11 @@ fn create_and_init_mpv(
             let _ = mpv_set_opt(api, handle, "start", &format!("{secs:.1}"));
         }
 
-        if let Some(hdrs) = headers
-            && !hdrs.is_empty()
-        {
-            let joined: Vec<String> = hdrs
-                .iter()
-                .map(|(k, v)| {
-                    let esc_v = v.replace('\\', "\\\\").replace(',', "\\,");
-                    format!("{k}: {esc_v}")
-                })
-                .collect();
-            let _ = mpv_set_opt(api, handle, "http-header-fields", &joined.join(","));
+        if let Some(hdrs) = headers {
+            let fields = format_http_header_fields(hdrs);
+            if !fields.is_empty() {
+                let _ = mpv_set_opt_string_array(api, handle, "http-header-fields", &fields);
+            }
         }
 
         for &(key, value) in &options.options {
@@ -1475,12 +1761,88 @@ fn create_and_init_mpv(
     Err(format!("mpv_initialize failed (error {last_err})"))
 }
 
+pub fn format_http_header_fields(headers: &HashMap<String, String>) -> Vec<String> {
+    let mut fields: Vec<String> = headers
+        .iter()
+        .filter_map(|(k, v)| {
+            let clean_k = k.replace(['\r', '\n'], "");
+            let clean_k = clean_k.trim();
+            if clean_k.is_empty() || clean_k.eq_ignore_ascii_case("range") {
+                return None;
+            }
+            let clean_v = v.replace(['\r', '\n'], "");
+            let clean_v = clean_v.trim();
+            Some(format!("{clean_k}: {clean_v}"))
+        })
+        .collect();
+    fields.sort();
+    fields
+}
+
+pub fn format_external_mpv_header_fields(headers: &HashMap<String, String>) -> Option<String> {
+    let fields = format_http_header_fields(headers);
+    if fields.is_empty() {
+        return None;
+    }
+    let escaped: Vec<String> = fields
+        .into_iter()
+        .map(|entry| entry.replace('\\', "\\\\").replace(',', "\\,"))
+        .collect();
+    Some(escaped.join(","))
+}
+
 fn mpv_set_opt(api: &MpvApi, handle: *mut c_void, k: &str, v: &str) -> Result<(), String> {
     let ck = CString::new(k).map_err(|e| e.to_string())?;
     let cv = CString::new(v).map_err(|e| e.to_string())?;
     let rc = unsafe { (api.set_option_string)(handle, ck.as_ptr(), cv.as_ptr()) };
     if rc < 0 {
         Err(format!("mpv_set_option_string({k}) failed: {rc}"))
+    } else {
+        Ok(())
+    }
+}
+
+fn mpv_set_opt_string_array(
+    api: &MpvApi,
+    handle: *mut c_void,
+    k: &str,
+    items: &[String],
+) -> Result<(), String> {
+    let ck = CString::new(k).map_err(|e| e.to_string())?;
+    let c_items: Vec<CString> = items
+        .iter()
+        .map(|s| CString::new(s.as_str()).map_err(|e| e.to_string()))
+        .collect::<Result<_, _>>()?;
+    let mut nodes: Vec<MpvNode> = c_items
+        .iter()
+        .map(|cs| MpvNode {
+            u: MpvNodeValue {
+                string: cs.as_ptr(),
+            },
+            format: MPV_FORMAT_STRING,
+        })
+        .collect();
+    let mut node_list = MpvNodeList {
+        num: nodes.len() as c_int,
+        values: nodes.as_mut_ptr(),
+        keys: std::ptr::null_mut(),
+    };
+    let mut root = MpvNode {
+        u: MpvNodeValue {
+            list: &mut node_list,
+        },
+        format: MPV_FORMAT_NODE_ARRAY,
+    };
+    let rc = unsafe {
+        (api.set_option)(
+            handle,
+            ck.as_ptr(),
+            MPV_FORMAT_NODE,
+            (&mut root as *mut MpvNode).cast(),
+        )
+    };
+    if rc < 0 {
+        Err(format!("mpv_set_option({k}) failed: {rc}"))
     } else {
         Ok(())
     }
@@ -1601,130 +1963,448 @@ fn format_track_label(title: &str, lang: &str, codec: &str, ch: &str, idx: usize
     }
 }
 
-fn read_player_state(
-    api: &MpvApi,
-    handle: *mut c_void,
-    first_frame_shown: bool,
-    ended_flag: bool,
-) -> (PlayerStatePayload, String) {
-    let count = get_prop_i64(api, handle, "track-list/count").clamp(0, 64);
-    let mut audio_tracks = Vec::new();
-    let mut subtitle_tracks = Vec::new();
-    let mut overlay_audio = Vec::new();
-    let mut overlay_subs = Vec::new();
+const PROP_TRACK_LIST: u64 = 1;
+const PROP_AID: u64 = 2;
+const PROP_SID: u64 = 3;
+const PROP_CHAPTER_COUNT: u64 = 4;
+const PROP_DURATION: u64 = 5;
+const PROP_TIME_POS: u64 = 6;
+const PROP_DEMUXER_CACHE_TIME: u64 = 7;
+const PROP_PAUSE: u64 = 8;
+const PROP_EOF_REACHED: u64 = 9;
+const PROP_PAUSED_FOR_CACHE: u64 = 10;
+const PROP_CORE_IDLE: u64 = 11;
+const PROP_VOLUME: u64 = 12;
+const PROP_SPEED: u64 = 13;
+const PROP_VIDEO_W: u64 = 14;
+const PROP_VIDEO_H: u64 = 15;
+const PROP_VIDEO_FORMAT: u64 = 16;
+const PROP_HWDEC_CURRENT: u64 = 17;
+const PROP_AUDIO_CODEC: u64 = 18;
+const PROP_AUDIO_CHANNELS: u64 = 19;
+const PROP_SECONDARY_SID: u64 = 20;
+const PROP_SECONDARY_SUB_TEXT: u64 = 21;
+const PROP_SECONDARY_SUB_START: u64 = 22;
 
-    for i in 0..count {
-        let t_type = get_prop_string(api, handle, &format!("track-list/{i}/type"));
-        if t_type != "audio" && t_type != "sub" {
-            continue;
+fn observe_player_properties(api: &MpvApi, handle: *mut c_void) {
+    let observed: &[(u64, &str, c_int)] = &[
+        (PROP_TRACK_LIST, "track-list", MPV_FORMAT_NONE),
+        (PROP_AID, "aid", MPV_FORMAT_NONE),
+        (PROP_SID, "sid", MPV_FORMAT_NONE),
+        (PROP_CHAPTER_COUNT, "chapter-list/count", MPV_FORMAT_INT64),
+        (PROP_DURATION, "duration", MPV_FORMAT_DOUBLE),
+        (PROP_TIME_POS, "time-pos", MPV_FORMAT_DOUBLE),
+        (
+            PROP_DEMUXER_CACHE_TIME,
+            "demuxer-cache-time",
+            MPV_FORMAT_DOUBLE,
+        ),
+        (PROP_PAUSE, "pause", MPV_FORMAT_FLAG),
+        (PROP_EOF_REACHED, "eof-reached", MPV_FORMAT_FLAG),
+        (PROP_PAUSED_FOR_CACHE, "paused-for-cache", MPV_FORMAT_FLAG),
+        (PROP_CORE_IDLE, "core-idle", MPV_FORMAT_FLAG),
+        (PROP_VOLUME, "volume", MPV_FORMAT_DOUBLE),
+        (PROP_SPEED, "speed", MPV_FORMAT_DOUBLE),
+        (PROP_VIDEO_W, "video-params/w", MPV_FORMAT_INT64),
+        (PROP_VIDEO_H, "video-params/h", MPV_FORMAT_INT64),
+        (PROP_VIDEO_FORMAT, "video-format", MPV_FORMAT_STRING),
+        (PROP_HWDEC_CURRENT, "hwdec-current", MPV_FORMAT_STRING),
+        (PROP_AUDIO_CODEC, "audio-codec-name", MPV_FORMAT_STRING),
+        (
+            PROP_AUDIO_CHANNELS,
+            "audio-params/channels",
+            MPV_FORMAT_STRING,
+        ),
+        (PROP_SECONDARY_SID, "secondary-sid", MPV_FORMAT_INT64),
+        (
+            PROP_SECONDARY_SUB_TEXT,
+            "secondary-sub-text",
+            MPV_FORMAT_STRING,
+        ),
+        (
+            PROP_SECONDARY_SUB_START,
+            "secondary-sub-start",
+            MPV_FORMAT_DOUBLE,
+        ),
+    ];
+
+    for &(tag, name, fmt) in observed {
+        if let Ok(cname) = CString::new(name) {
+            unsafe {
+                (api.observe_property)(handle, tag, cname.as_ptr(), fmt);
+            }
         }
-        let id = get_prop_i64(api, handle, &format!("track-list/{i}/id"));
-        let title = get_prop_string(api, handle, &format!("track-list/{i}/title"));
-        let lang = get_prop_string(api, handle, &format!("track-list/{i}/lang"));
-        let codec = get_prop_string(api, handle, &format!("track-list/{i}/codec"));
-        let channels = get_prop_string(api, handle, &format!("track-list/{i}/demux-channels"));
-        let selected = get_prop_flag(api, handle, &format!("track-list/{i}/selected"));
-        let forced = get_prop_flag(api, handle, &format!("track-list/{i}/forced"));
+    }
+}
 
-        let track = MediaTrack {
-            external: get_prop_flag(api, handle, &format!("track-list/{i}/external")),
-            id,
-            track_type: t_type.clone(),
-            title: title.clone(),
-            lang: lang.clone(),
-            codec: codec.clone(),
-            channels: channels.clone(),
-            selected,
-            forced,
+#[derive(Default)]
+struct PropertyChangeFlags {
+    tracks_dirty: bool,
+    chapters_dirty: bool,
+    discrete: bool,
+    continuous: bool,
+}
+
+fn prop_event_double(prop: &MpvEventProperty) -> f64 {
+    if prop.format == MPV_FORMAT_DOUBLE && !prop.data.is_null() {
+        let val = unsafe { *(prop.data as *const c_double) };
+        if val.is_finite() { val } else { 0.0 }
+    } else {
+        0.0
+    }
+}
+
+fn prop_event_flag(prop: &MpvEventProperty) -> bool {
+    if prop.format == MPV_FORMAT_FLAG && !prop.data.is_null() {
+        unsafe { *(prop.data as *const c_int) != 0 }
+    } else {
+        false
+    }
+}
+
+fn prop_event_i64(prop: &MpvEventProperty) -> i64 {
+    if prop.format == MPV_FORMAT_INT64 && !prop.data.is_null() {
+        unsafe { *(prop.data as *const i64) }
+    } else {
+        0
+    }
+}
+
+fn prop_event_string(prop: &MpvEventProperty) -> String {
+    if prop.format == MPV_FORMAT_STRING && !prop.data.is_null() {
+        let ptr = unsafe { *(prop.data as *const *const c_char) };
+        if !ptr.is_null() {
+            return unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() };
+        }
+    }
+    String::new()
+}
+
+struct CachedPlayerState {
+    audio_tracks: Vec<MediaTrack>,
+    subtitle_tracks: Vec<MediaTrack>,
+    overlay_audio: Vec<OverlayTrack>,
+    overlay_subs: Vec<OverlayTrack>,
+    chapters: Vec<SkipChapter>,
+    duration_secs: f64,
+    position_secs: f64,
+    demux_cache: f64,
+    paused: bool,
+    eof_reached: bool,
+    paused_for_cache: bool,
+    core_idle: bool,
+    volume: f64,
+    speed: f64,
+    media_info: PlayerMediaInfo,
+    reference_id: i64,
+    reference_text: String,
+    reference_start_secs: f64,
+}
+
+impl Default for CachedPlayerState {
+    fn default() -> Self {
+        Self {
+            audio_tracks: Vec::new(),
+            subtitle_tracks: Vec::new(),
+            overlay_audio: Vec::new(),
+            overlay_subs: Vec::new(),
+            chapters: Vec::new(),
+            duration_secs: 0.0,
+            position_secs: 0.0,
+            demux_cache: 0.0,
+            paused: false,
+            eof_reached: false,
+            paused_for_cache: false,
+            core_idle: false,
+            volume: 100.0,
+            speed: 1.0,
+            media_info: PlayerMediaInfo {
+                width: 0,
+                height: 0,
+                video_codec: String::new(),
+                hwdec: String::new(),
+                audio_codec: String::new(),
+                audio_channels: String::new(),
+            },
+            reference_id: 0,
+            reference_text: String::new(),
+            reference_start_secs: 0.0,
+        }
+    }
+}
+
+impl CachedPlayerState {
+    fn apply_property_event(
+        &mut self,
+        userdata: u64,
+        prop: &MpvEventProperty,
+    ) -> PropertyChangeFlags {
+        let mut flags = PropertyChangeFlags::default();
+        match userdata {
+            PROP_TRACK_LIST | PROP_AID | PROP_SID => {
+                flags.tracks_dirty = true;
+            }
+            PROP_CHAPTER_COUNT => {
+                flags.chapters_dirty = true;
+            }
+            PROP_DURATION => {
+                self.duration_secs = prop_event_double(prop);
+                flags.discrete = true;
+            }
+            PROP_TIME_POS => {
+                self.position_secs = prop_event_double(prop);
+                flags.continuous = true;
+            }
+            PROP_DEMUXER_CACHE_TIME => {
+                self.demux_cache = prop_event_double(prop);
+                flags.continuous = true;
+            }
+            PROP_PAUSE => {
+                self.paused = prop_event_flag(prop);
+                flags.discrete = true;
+            }
+            PROP_EOF_REACHED => {
+                self.eof_reached = prop_event_flag(prop);
+                flags.discrete = true;
+            }
+            PROP_PAUSED_FOR_CACHE => {
+                self.paused_for_cache = prop_event_flag(prop);
+                flags.discrete = true;
+            }
+            PROP_CORE_IDLE => {
+                self.core_idle = prop_event_flag(prop);
+                flags.discrete = true;
+            }
+            PROP_VOLUME => {
+                self.volume = prop_event_double(prop).clamp(0.0, 200.0);
+                flags.discrete = true;
+            }
+            PROP_SPEED => {
+                self.speed = prop_event_double(prop);
+                flags.discrete = true;
+            }
+            PROP_VIDEO_W => {
+                self.media_info.width = prop_event_i64(prop);
+                flags.discrete = true;
+            }
+            PROP_VIDEO_H => {
+                self.media_info.height = prop_event_i64(prop);
+                flags.discrete = true;
+            }
+            PROP_VIDEO_FORMAT => {
+                self.media_info.video_codec = prop_event_string(prop);
+                flags.discrete = true;
+            }
+            PROP_HWDEC_CURRENT => {
+                self.media_info.hwdec = prop_event_string(prop);
+                flags.discrete = true;
+            }
+            PROP_AUDIO_CODEC => {
+                self.media_info.audio_codec = prop_event_string(prop);
+                flags.discrete = true;
+            }
+            PROP_AUDIO_CHANNELS => {
+                self.media_info.audio_channels = prop_event_string(prop);
+                flags.discrete = true;
+            }
+            PROP_SECONDARY_SID => {
+                self.reference_id = prop_event_i64(prop);
+                flags.discrete = true;
+            }
+            PROP_SECONDARY_SUB_TEXT => {
+                self.reference_text = prop_event_string(prop);
+                flags.discrete = true;
+            }
+            PROP_SECONDARY_SUB_START => {
+                self.reference_start_secs = prop_event_double(prop);
+                flags.discrete = true;
+            }
+            _ => {}
+        }
+        flags
+    }
+
+    fn refresh_tracks(&mut self, api: &MpvApi, handle: *mut c_void) {
+        let count = get_prop_i64(api, handle, "track-list/count").clamp(0, 64);
+        self.audio_tracks.clear();
+        self.subtitle_tracks.clear();
+        self.overlay_audio.clear();
+        self.overlay_subs.clear();
+
+        for i in 0..count {
+            let t_type = get_prop_string(api, handle, &format!("track-list/{i}/type"));
+            if t_type != "audio" && t_type != "sub" {
+                continue;
+            }
+            let id = get_prop_i64(api, handle, &format!("track-list/{i}/id"));
+            let title = get_prop_string(api, handle, &format!("track-list/{i}/title"));
+            let lang = get_prop_string(api, handle, &format!("track-list/{i}/lang"));
+            let codec = get_prop_string(api, handle, &format!("track-list/{i}/codec"));
+            let channels = get_prop_string(api, handle, &format!("track-list/{i}/demux-channels"));
+            let selected = get_prop_flag(api, handle, &format!("track-list/{i}/selected"));
+            let forced = get_prop_flag(api, handle, &format!("track-list/{i}/forced"));
+
+            let track = MediaTrack {
+                external: get_prop_flag(api, handle, &format!("track-list/{i}/external")),
+                id,
+                track_type: t_type.clone(),
+                title: title.clone(),
+                lang: lang.clone(),
+                codec: codec.clone(),
+                channels: channels.clone(),
+                selected,
+                forced,
+            };
+            if t_type == "audio" {
+                let idx = self.audio_tracks.len();
+                self.overlay_audio.push(OverlayTrack {
+                    index: idx,
+                    id: id.to_string(),
+                    label: format_track_label(&title, &lang, &codec, &channels, idx),
+                    language: lang,
+                    selected,
+                    forced,
+                });
+                self.audio_tracks.push(track);
+            } else {
+                let idx = self.subtitle_tracks.len();
+                self.overlay_subs.push(OverlayTrack {
+                    index: idx,
+                    id: id.to_string(),
+                    label: format_track_label(&title, &lang, &codec, "", idx),
+                    language: lang,
+                    selected,
+                    forced,
+                });
+                self.subtitle_tracks.push(track);
+            }
+        }
+    }
+
+    fn refresh_chapters(&mut self, api: &MpvApi, handle: *mut c_void) {
+        let chap_count = get_prop_i64(api, handle, "chapter-list/count").clamp(0, 128);
+        self.chapters.clear();
+        for i in 0..chap_count {
+            let start_s = get_prop_double(api, handle, &format!("chapter-list/{i}/time"));
+            let title = get_prop_string(api, handle, &format!("chapter-list/{i}/title"));
+            self.chapters.push(SkipChapter {
+                start_ms: (start_s * 1000.0).round() as i64,
+                end_ms: None,
+                title,
+            });
+        }
+    }
+
+    fn build_payload_and_js(
+        &self,
+        first_frame_shown: bool,
+        ended_flag: bool,
+    ) -> (PlayerStatePayload, String) {
+        let buffered_secs = self.demux_cache.max(self.position_secs).max(0.0);
+        let ended = ended_flag || self.eof_reached;
+        let loading = !first_frame_shown
+            || self.paused_for_cache
+            || (self.core_idle && !self.paused && !ended && self.duration_secs <= 0.0);
+        let volume_level = (self.volume / 100.0).clamp(0.0, 2.0);
+
+        let audio_json = serde_json::to_string(&self.overlay_audio).unwrap_or_else(|_| "[]".into());
+        let sub_json = serde_json::to_string(&self.overlay_subs).unwrap_or_else(|_| "[]".into());
+        let update_js = format!(
+            "window.playerUpdate&&window.playerUpdate({{duration:{:.3},position:{:.3},bufferedPosition:{buffered_secs:.3},volumeLevel:{volume_level:.3},paused:{},loading:{loading},audioTracks:{audio_json},subtitleTracks:{sub_json}}})",
+            self.duration_secs, self.position_secs, self.paused,
+        );
+
+        let payload = PlayerStatePayload {
+            active: true,
+            paused: self.paused,
+            buffering: self.paused_for_cache,
+            loading,
+            ended,
+            position_secs: self.position_secs,
+            duration_secs: self.duration_secs,
+            buffered_secs,
+            volume: self.volume,
+            speed: self.speed,
+            audio_tracks: self.audio_tracks.clone(),
+            subtitle_tracks: self.subtitle_tracks.clone(),
+            reference_id: self.reference_id,
+            reference_text: self.reference_text.clone(),
+            reference_start_secs: self.reference_start_secs,
+            chapters: self.chapters.clone(),
+            media_info: self.media_info.clone(),
         };
-        if t_type == "audio" {
-            let idx = audio_tracks.len();
-            overlay_audio.push(OverlayTrack {
-                index: idx,
-                id: id.to_string(),
-                label: format_track_label(&title, &lang, &codec, &channels, idx),
-                language: lang,
-                selected,
-                forced,
-            });
-            audio_tracks.push(track);
-        } else {
-            let idx = subtitle_tracks.len();
-            overlay_subs.push(OverlayTrack {
-                index: idx,
-                id: id.to_string(),
-                label: format_track_label(&title, &lang, &codec, "", idx),
-                language: lang,
-                selected,
-                forced,
-            });
-            subtitle_tracks.push(track);
-        }
+
+        (payload, update_js)
+    }
+}
+
+#[cfg(test)]
+mod player_tests {
+    use super::{
+        CachedPlayerState, MpvNode, MpvNodeList, format_external_mpv_header_fields,
+        format_http_header_fields,
+    };
+    use std::collections::HashMap;
+
+    #[test]
+    fn filters_range_and_preserves_commas_and_backslashes_for_node_array() {
+        let mut headers = HashMap::new();
+        headers.insert("Range".to_string(), "bytes=0-1024".to_string());
+        headers.insert("range".to_string(), "bytes=512-".to_string());
+        headers.insert("User-Agent".to_string(), "Mozilla/5.0 (Win64, x64)\\v1".to_string());
+        headers.insert("Cookie".to_string(), "a=1,2; b=x\\y\r\n".to_string());
+        headers.insert("   ".to_string(), "ignored".to_string());
+
+        let fields = format_http_header_fields(&headers);
+        assert_eq!(
+            fields,
+            vec![
+                "Cookie: a=1,2; b=x\\y".to_string(),
+                "User-Agent: Mozilla/5.0 (Win64, x64)\\v1".to_string(),
+            ]
+        );
     }
 
-    let chap_count = get_prop_i64(api, handle, "chapter-list/count").clamp(0, 128);
-    let mut chapters = Vec::new();
-    for i in 0..chap_count {
-        let start_s = get_prop_double(api, handle, &format!("chapter-list/{i}/time"));
-        let title = get_prop_string(api, handle, &format!("chapter-list/{i}/title"));
-        chapters.push(SkipChapter {
-            start_ms: (start_s * 1000.0).round() as i64,
-            end_ms: None,
-            title,
-        });
+    #[test]
+    fn external_header_fields_strip_range_and_escape_cli_delimiters() {
+        let mut headers = HashMap::new();
+        headers.insert("RANGE".to_string(), "bytes=0-1".to_string());
+        assert_eq!(format_external_mpv_header_fields(&headers), None);
+
+        headers.insert("Referer".to_string(), "https://ex.com/a,b\\c".to_string());
+        assert_eq!(
+            format_external_mpv_header_fields(&headers).as_deref(),
+            Some("Referer: https://ex.com/a\\,b\\\\c")
+        );
     }
 
-    let duration_secs = get_prop_double(api, handle, "duration");
-    let position_secs = get_prop_double(api, handle, "time-pos");
-    let demux_cache = get_prop_double(api, handle, "demuxer-cache-time");
-    let buffered_secs = demux_cache.max(position_secs).max(0.0);
-    let paused = get_prop_flag(api, handle, "pause");
-    let eof_reached = get_prop_flag(api, handle, "eof-reached");
-    let paused_for_cache = get_prop_flag(api, handle, "paused-for-cache");
-    let core_idle = get_prop_flag(api, handle, "core-idle");
-    let ended = ended_flag || eof_reached;
-    let loading = !first_frame_shown
-        || paused_for_cache
-        || (core_idle && !paused && !ended && duration_secs <= 0.0);
+    #[test]
+    fn mpv_node_layout_matches_c_abi() {
+        assert_eq!(std::mem::size_of::<MpvNode>(), 16);
+        assert_eq!(std::mem::align_of::<MpvNode>(), 8);
+        assert!(std::mem::size_of::<MpvNodeList>() >= 24);
+    }
 
-    let volume = get_prop_double(api, handle, "volume").clamp(0.0, 200.0);
-    let volume_level = (volume / 100.0).clamp(0.0, 2.0);
-    let speed = get_prop_double(api, handle, "speed");
+    #[test]
+    fn cached_player_state_computes_loading_ended_and_buffer() {
+        let mut state = CachedPlayerState {
+            duration_secs: 120.0,
+            position_secs: 30.0,
+            demux_cache: 45.0,
+            volume: 150.0,
+            ..Default::default()
+        };
 
-    let media_info = PlayerMediaInfo {
-        width: get_prop_i64(api, handle, "video-params/w"),
-        height: get_prop_i64(api, handle, "video-params/h"),
-        video_codec: get_prop_string(api, handle, "video-format"),
-        hwdec: get_prop_string(api, handle, "hwdec-current"),
-        audio_codec: get_prop_string(api, handle, "audio-codec-name"),
-        audio_channels: get_prop_string(api, handle, "audio-params/channels"),
-    };
+        let (payload, js) = state.build_payload_and_js(true, false);
+        assert!(!payload.loading);
+        assert!(!payload.ended);
+        assert_eq!(payload.buffered_secs, 45.0);
+        assert!(js.contains("volumeLevel:1.500"));
+        assert!(js.contains("position:30.000"));
 
-    let audio_json = serde_json::to_string(&overlay_audio).unwrap_or_else(|_| "[]".into());
-    let sub_json = serde_json::to_string(&overlay_subs).unwrap_or_else(|_| "[]".into());
-    let update_js = format!(
-        "window.playerUpdate&&window.playerUpdate({{duration:{duration_secs:.3},position:{position_secs:.3},bufferedPosition:{buffered_secs:.3},volumeLevel:{volume_level:.3},paused:{paused},loading:{loading},audioTracks:{audio_json},subtitleTracks:{sub_json}}})"
-    );
-
-    let payload = PlayerStatePayload {
-        active: true,
-        paused,
-        buffering: paused_for_cache,
-        loading,
-        ended,
-        position_secs,
-        duration_secs,
-        buffered_secs,
-        volume,
-        speed,
-        audio_tracks,
-        subtitle_tracks,
-        reference_id: get_prop_i64(api, handle, "secondary-sid"),
-        reference_text: get_prop_string(api, handle, "secondary-sub-text"),
-        reference_start_secs: get_prop_double(api, handle, "secondary-sub-start"),
-        chapters,
-        media_info,
-    };
-
-    (payload, update_js)
+        state.paused_for_cache = true;
+        let (buffering_payload, _) = state.build_payload_and_js(true, false);
+        assert!(buffering_payload.loading);
+        assert!(buffering_payload.buffering);
+    }
 }

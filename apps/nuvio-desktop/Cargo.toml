@@ -6,10 +6,12 @@ license.workspace = true
 
 [build-dependencies]
 tauri-build = { version = "2.7", features = [] }
+flate2 = "1.1"
 
 [dependencies]
 nuvio-core = { path = "../../crates/nuvio-core" }
 tauri = { version = "2.12", features = [] }
+flate2 = "1.1"
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

@@ -10,7 +10,7 @@ for (const [provider, name] of Object.entries(connectedNames)) {
   const icon = provider === 'torbox'
     ? '<img src="assets/torbox_logo.png" alt="" />'
     : '<span class="nv-link-icon">🔗</span>';
-  card.innerHTML = `<div class="nv-row"><span class="service-icon" aria-hidden="true">${icon}</span><span class="nv-copy"><span class="nv-title"></span><span class="nv-desc"></span><span class="nv-account-extra"></span></span><span class="nv-account-side"><span role="status" class="nv-value">Não definido</span><span class="nv-account-actions"><button class="btn-accent nv-mini-btn" data-action="login">Conectar</button><button class="btn-ghost nv-mini-btn" data-action="disconnect" hidden>Desconectar</button></span></span></div><details class="nv-account-manual"><summary>Colar token / chave de API</summary><div class="nv-manual-body"><label class="field-col">Token de API<input type="password" autocomplete="off" placeholder="Cole seu token aqui"></label><button class="btn-ghost nv-mini-btn" data-action="key">Conectar com token</button></div></details>`;
+  card.innerHTML = `<div class="nv-row"><span class="service-icon" aria-hidden="true">${icon}</span><span class="nv-copy"><span class="nv-title"></span><span class="nv-desc"></span><span class="nv-account-extra"></span></span><span class="nv-account-side"><button type="button" class="nv-value nv-account-status" data-action="login" title="Clique para conectar">Não definido</button></span></div><details class="nv-account-manual"><summary>Colar token / chave de API</summary><div class="nv-manual-body"><label class="field-col">Token de API<input type="password" autocomplete="off" placeholder="Cole seu token aqui"></label><button class="btn-ghost nv-mini-btn" data-action="key">Conectar com token</button></div></details>`;
   card.querySelector('.nv-title').textContent = name;
   card.querySelector('.nv-desc').textContent = provider === 'torbox'
     ? 'Vincule sua conta Torbox no navegador ou cole seu token abaixo.' : 'Vincule sua conta Premiumize no navegador ou cole sua chave abaixo.';
@@ -24,7 +24,7 @@ for (const [provider, name] of Object.entries(connectedNames)) {
     card.querySelector('.nv-account-extra').append(label);
   }
   document.getElementById('connected-provider-cards').append(card);
-  const status = card.querySelector('[role="status"]');
+  const status = card.querySelector('.nv-account-status');
   card.addEventListener('click', async ev => {
     const btn = ev.target.closest('[data-action]');
     if (!btn) return;
@@ -67,10 +67,12 @@ async function refreshConnectedAccounts() {
   try {
     const accounts = await invoke('connected_accounts');
     document.querySelectorAll('[data-account]').forEach(card => {
-      const linked = accounts[card.dataset.account];
-      card.querySelector('[role="status"]').textContent = linked ? 'Conectado' : 'Não definido';
-      card.querySelector('[data-action="login"]').hidden = linked;
-      card.querySelector('[data-action="disconnect"]').hidden = !linked;
+      const linked = Boolean(accounts[card.dataset.account]);
+      const status = card.querySelector('.nv-account-status');
+      status.textContent = linked ? 'Conectado' : 'Não definido';
+      status.dataset.action = linked ? 'disconnect' : 'login';
+      status.title = linked ? 'Clique para desconectar' : 'Clique para conectar';
+      status.classList.toggle('is-linked', linked);
     });
   } catch (e) { showToast(String(e)); }
 }

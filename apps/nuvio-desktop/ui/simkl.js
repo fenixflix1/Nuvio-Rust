@@ -9,7 +9,19 @@ function simklProgressMatches(card, id) {
 }
 
 const simklField = name => document.getElementById('simkl-' + name);
-const simklUses = key => simklAccount.connected && simklAccount.sources?.[key] === 'simkl';
+const simklUses = key => {
+  if (key === 'library') {
+    return typeof activeLibrarySource === 'function'
+      ? activeLibrarySource() === 'simkl'
+      : (simklAccount.connected && simklAccount.sources?.library === 'simkl');
+  }
+  if (key === 'progress') {
+    return typeof activeProgressSource === 'function'
+      ? activeProgressSource() === 'simkl'
+      : (simklAccount.connected && simklAccount.sources?.progress === 'simkl');
+  }
+  return simklAccount.connected && simklAccount.sources?.[key] === 'simkl';
+};
 const simklRequest = (action, data = null) => invoke('simkl_action', {profile:simklAccount.profile, action, data});
 
 function simklRenderAccount() {
@@ -19,6 +31,20 @@ function simklRenderAccount() {
   for (const id of ['client-field','connect']) simklField(id).classList.toggle('hidden', connected);
   for (const id of ['sync','disconnect']) simklField(id).classList.toggle('hidden', !connected);
   document.querySelectorAll('[data-simkl-source]').forEach(select => {
+    if (select.dataset.simklSource === 'library') {
+      select.value = typeof activeLibrarySource === 'function'
+        ? activeLibrarySource()
+        : (appSettings?.library_source || 'default');
+      select.disabled = false;
+      return;
+    }
+    if (select.dataset.simklSource === 'progress') {
+      select.value = typeof activeProgressSource === 'function'
+        ? activeProgressSource()
+        : (appSettings?.progress_source || 'default');
+      select.disabled = false;
+      return;
+    }
     select.value = simklAccount.sources?.[select.dataset.simklSource] || simklDefaultSources[select.dataset.simklSource];
     select.disabled = !connected;
   });
@@ -104,6 +130,58 @@ simklField('sync').onclick = async () => {
 };
 document.querySelectorAll('[data-simkl-source]').forEach(select => {
   select.onchange = async () => {
+    if (select.dataset.simklSource === 'library') {
+      const nextSource = select.value;
+      if (nextSource === 'simkl' && !simklAccount.connected) {
+        showToast('Conecte sua conta Simkl acima para usar como fonte da biblioteca.');
+        simklRenderAccount();
+        return;
+      }
+      if (nextSource === 'mdblist' && !String(appSettings?.services?.mdblist_key || '').trim()) {
+        showToast('Configure a chave de API do MDBList em Ajustes → Integrações.');
+        simklRenderAccount();
+        return;
+      }
+      try {
+        await persistSettingsPatch({ library_source: nextSource });
+        if (simklAccount.connected) {
+          const sources = {...simklDefaultSources, ...simklAccount.sources, library: nextSource === 'simkl' ? 'simkl' : 'default'};
+          await simklRequest('sources', sources);
+          simklAccount.sources = sources;
+        }
+        await refreshLibraryState(true);
+        renderFilteredLibrary();
+        refreshPosterLibraryBadges();
+      } catch(e) { simklRenderAccount(); showToast(String(e)); }
+      return;
+    }
+    if (select.dataset.simklSource === 'progress') {
+      const nextSource = select.value;
+      if (nextSource === 'simkl' && !simklAccount.connected) {
+        showToast('Conecte sua conta Simkl acima para usar como progresso de reprodução.');
+        simklRenderAccount();
+        return;
+      }
+      if (nextSource === 'mdblist' && !String(appSettings?.services?.mdblist_key || '').trim()) {
+        showToast('Conecte sua conta MDBList acima antes de selecioná-la como fonte.');
+        simklRenderAccount();
+        return;
+      }
+      try {
+        await persistSettingsPatch({ progress_source: nextSource });
+        if (simklAccount.connected) {
+          const sources = {...simklDefaultSources, ...simklAccount.sources, progress: nextSource === 'simkl' ? 'simkl' : 'default'};
+          await simklRequest('sources', sources);
+          simklAccount.sources = sources;
+        }
+        if (nextSource === 'mdblist' && typeof refreshMdblistProgress === 'function') {
+          await refreshMdblistProgress(true);
+        }
+        await Promise.all([refreshWatchedKeys(), refreshContinueWatching()]);
+        refreshPosterWatchedBadges();
+      } catch(e) { simklRenderAccount(); showToast(String(e)); }
+      return;
+    }
     const sources = {...simklDefaultSources, ...simklAccount.sources, [select.dataset.simklSource]:select.value};
     try {
       await simklRequest('sources',sources);
@@ -285,3 +363,164 @@ function simklRenderDetails(preview, container) {
     }
   }).catch(e => {if (section.isConnected) section.textContent = 'Falha ao carregar títulos semelhantes. ' + String(e);});
 }
+
+let mdblistCardUsername = '';
+
+async function refreshMdblistAccountCard(verify = false) {
+  const accountEl = document.getElementById('mdblist-account');
+  const connectBox = document.getElementById('mdblist-connect-box');
+  const keyInput = document.getElementById('mdblist-card-key');
+  const connectBtn = document.getElementById('btn-mdblist-connect');
+  const syncBtn = document.getElementById('btn-mdblist-sync');
+  const disconnectBtn = document.getElementById('btn-mdblist-disconnect');
+  const statusEl = document.getElementById('mdblist-card-status');
+  if (!accountEl || !connectBtn) return;
+
+  const key = String(appSettings?.services?.mdblist_key || '').trim();
+  if (keyInput && document.activeElement !== keyInput) keyInput.value = key;
+
+  if (!key) {
+    mdblistCardUsername = '';
+    accountEl.textContent = '';
+    accountEl.classList.add('hidden');
+    connectBtn.classList.remove('hidden');
+    syncBtn?.classList.add('hidden');
+    disconnectBtn?.classList.add('hidden');
+    return;
+  }
+
+  connectBox?.classList.add('hidden');
+  connectBtn.classList.add('hidden');
+  syncBtn?.classList.remove('hidden');
+  disconnectBtn?.classList.remove('hidden');
+  accountEl.classList.remove('hidden');
+  accountEl.textContent = mdblistCardUsername ? `Conectado como ${mdblistCardUsername}` : 'Conectado ao MDBList';
+
+  if (verify) {
+    try {
+      const info = await invoke('mdblist_account_status');
+      if (info?.connected) {
+        mdblistCardUsername = info.username || '';
+        accountEl.textContent = mdblistCardUsername ? `Conectado como ${mdblistCardUsername}` : 'Conectado ao MDBList';
+        if (statusEl && statusEl.textContent.startsWith('Falha')) statusEl.textContent = '';
+      }
+    } catch (e) {
+      if (statusEl) statusEl.textContent = String(e);
+    }
+  }
+}
+window.refreshMdblistAccountCard = refreshMdblistAccountCard;
+
+async function saveMdblistCardKey() {
+  const keyInput = document.getElementById('mdblist-card-key');
+  const saveBtn = document.getElementById('btn-mdblist-save-key');
+  const statusEl = document.getElementById('mdblist-card-status');
+  const key = String(keyInput?.value || '').trim();
+  if (!key) {
+    if (statusEl) statusEl.textContent = 'Cole sua chave de API do MDBList.';
+    keyInput?.focus();
+    return;
+  }
+  const prevKey = String(appSettings?.services?.mdblist_key || '');
+  if (saveBtn) saveBtn.disabled = true;
+  if (statusEl) statusEl.textContent = 'Validando chave do MDBList...';
+  try {
+    const nextServices = { ...(appSettings?.services || {}), mdblist_key: key };
+    await persistSettingsPatch({ services: nextServices });
+    const info = await invoke('mdblist_account_status');
+    mdblistCardUsername = info?.username || '';
+    document.getElementById('mdblist-connect-box')?.classList.add('hidden');
+    if (statusEl) statusEl.textContent = 'MDBList conectado com sucesso.';
+    await refreshMdblistAccountCard(false);
+    if (typeof activeLibrarySource === 'function' && activeLibrarySource() === 'mdblist') {
+      await refreshLibraryState(true);
+      renderFilteredLibrary();
+      refreshPosterLibraryBadges();
+    }
+    if (typeof activeProgressSource === 'function' && activeProgressSource() === 'mdblist') {
+      if (typeof refreshMdblistProgress === 'function') await refreshMdblistProgress(true);
+      await Promise.all([refreshWatchedKeys(), refreshContinueWatching()]);
+      refreshPosterWatchedBadges();
+    }
+  } catch (e) {
+    const revertServices = { ...(appSettings?.services || {}), mdblist_key: prevKey };
+    await persistSettingsPatch({ services: revertServices }).catch(() => {});
+    if (statusEl) statusEl.textContent = String(e);
+    await refreshMdblistAccountCard(false);
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
+  }
+}
+
+document.getElementById('btn-mdblist-open')?.addEventListener('click', () => {
+  invoke('open_external_url', { url: 'https://mdblist.com' });
+});
+
+document.getElementById('btn-mdblist-connect')?.addEventListener('click', () => {
+  const box = document.getElementById('mdblist-connect-box');
+  if (!box) return;
+  box.classList.toggle('hidden');
+  if (!box.classList.contains('hidden')) {
+    document.getElementById('mdblist-card-key')?.focus();
+  }
+});
+
+document.getElementById('btn-mdblist-save-key')?.addEventListener('click', saveMdblistCardKey);
+document.getElementById('mdblist-card-key')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    saveMdblistCardKey();
+  }
+});
+
+document.getElementById('btn-mdblist-sync')?.addEventListener('click', async () => {
+  const btn = document.getElementById('btn-mdblist-sync');
+  const statusEl = document.getElementById('mdblist-card-status');
+  if (btn) btn.disabled = true;
+  if (statusEl) statusEl.textContent = 'Sincronizando MDBList...';
+  try {
+    const tasks = [refreshMdblistAccountCard(true)];
+    if (typeof activeLibrarySource === 'function' && activeLibrarySource() === 'mdblist') {
+      tasks.push(refreshLibraryState(true));
+    }
+    if (typeof refreshMdblistProgress === 'function') {
+      tasks.push(refreshMdblistProgress(true));
+    }
+    await Promise.all(tasks);
+    await Promise.all([refreshWatchedKeys(), refreshContinueWatching()]);
+    renderFilteredLibrary();
+    refreshPosterLibraryBadges();
+    refreshPosterWatchedBadges();
+    if (statusEl) statusEl.textContent = 'Sincronização MDBList concluída.';
+  } catch (e) {
+    if (statusEl) statusEl.textContent = String(e);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+});
+
+document.getElementById('btn-mdblist-disconnect')?.addEventListener('click', async () => {
+  const statusEl = document.getElementById('mdblist-card-status');
+  try {
+    const patch = {
+      services: { ...(appSettings?.services || {}), mdblist_key: '' },
+    };
+    if (typeof activeLibrarySource === 'function' && activeLibrarySource() === 'mdblist') {
+      patch.library_source = 'default';
+    }
+    if (typeof activeProgressSource === 'function' && activeProgressSource() === 'mdblist') {
+      patch.progress_source = 'default';
+    }
+    await persistSettingsPatch(patch);
+    mdblistCardUsername = '';
+    if (typeof clearMdblistState === 'function') clearMdblistState();
+    await refreshMdblistAccountCard(false);
+    await Promise.all([refreshWatchedKeys(), refreshLibraryState(), refreshContinueWatching()]);
+    renderFilteredLibrary();
+    refreshPosterLibraryBadges();
+    refreshPosterWatchedBadges();
+    if (statusEl) statusEl.textContent = 'MDBList desconectado.';
+  } catch (e) {
+    showToast(String(e));
+  }
+});

@@ -4,6 +4,7 @@ use reqwest::{Client, Method, StatusCode};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::sync::{Arc, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 
 pub const OFFICIAL_NUVIO_SERVER_URL: &str = "https://api.nuvio.tv";
@@ -272,12 +273,67 @@ pub struct SupabaseUser {
     pub user_metadata: Option<Value>,
 }
 
+type SessionListener = Arc<dyn Fn(&SupabaseSession) + Send + Sync>;
+
+fn decode_base64url(input: &str) -> Option<Vec<u8>> {
+    let mut buf: u32 = 0;
+    let mut bits: u8 = 0;
+    let mut out = Vec::with_capacity((input.len() * 3) / 4);
+    for b in input.bytes() {
+        let val = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            b'=' => break,
+            _ => return None,
+        };
+        buf = (buf << 6) | u32::from(val);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+
+fn jwt_exp_unix(token: &str) -> Option<u64> {
+    let payload_b64 = token.split('.').nth(1)?;
+    let bytes = decode_base64url(payload_b64)?;
+    let payload: Value = serde_json::from_slice(&bytes).ok()?;
+    payload.get("exp").and_then(Value::as_u64)
+}
+
+fn is_jwt_expiring_soon_at(token: &str, now_secs: u64, leeway_secs: u64) -> bool {
+    let Some(exp) = jwt_exp_unix(token) else {
+        return false;
+    };
+    now_secs.saturating_add(leeway_secs) >= exp
+}
+
+fn is_jwt_expired_error(err: &SupabaseError) -> bool {
+    match err {
+        SupabaseError::Api { status: 401, body } => {
+            let lower = body.to_ascii_lowercase();
+            body.contains("PGRST303")
+                || lower.contains("jwt expired")
+                || lower.contains("invalid jwt")
+        }
+        _ => false,
+    }
+}
+
 /// Pure-Rust Supabase client covering Auth, PostgREST, Functions, Storage, and Realtime.
 #[derive(Clone)]
 pub struct SupabaseClient {
     config: SupabaseConfig,
     http: Client,
     session: Arc<RwLock<Option<SupabaseSession>>>,
+    refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    session_listener: Arc<RwLock<Option<SessionListener>>>,
 }
 
 impl SupabaseClient {
@@ -287,6 +343,8 @@ impl SupabaseClient {
             config,
             http,
             session: Arc::new(RwLock::new(None)),
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            session_listener: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -302,6 +360,27 @@ impl SupabaseClient {
         *self.session.write().expect("session lock poisoned") = Some(session);
     }
 
+    pub fn set_session_listener<F>(&self, listener: F)
+    where
+        F: Fn(&SupabaseSession) + Send + Sync + 'static,
+    {
+        *self
+            .session_listener
+            .write()
+            .expect("session listener lock poisoned") = Some(Arc::new(listener));
+    }
+
+    fn notify_session(&self, session: &SupabaseSession) {
+        let cb = self
+            .session_listener
+            .read()
+            .expect("session listener lock poisoned")
+            .clone();
+        if let Some(cb) = cb {
+            cb(session);
+        }
+    }
+
     pub fn clear_session(&self) {
         *self.session.write().expect("session lock poisoned") = None;
     }
@@ -315,18 +394,31 @@ impl SupabaseClient {
             .unwrap_or_else(|| self.config.anon_key.clone())
     }
 
-    async fn send_json<T: DeserializeOwned>(
+    fn has_refresh_token(&self) -> bool {
+        self.session
+            .read()
+            .expect("session lock poisoned")
+            .as_ref()
+            .and_then(|s| s.refresh_token.as_deref())
+            .is_some_and(|t| !t.trim().is_empty())
+    }
+
+    async fn send_json_once<T: DeserializeOwned>(
         &self,
         method: Method,
         url: &str,
         body: Option<&Value>,
         extra_headers: &[(&str, &str)],
+        bearer_override: Option<&str>,
     ) -> Result<T> {
+        let token = bearer_override
+            .map(str::to_string)
+            .unwrap_or_else(|| self.bearer_token());
         let mut req = self
             .http
             .request(method, url)
             .header("apikey", &self.config.anon_key)
-            .header("Authorization", format!("Bearer {}", self.bearer_token()));
+            .header("Authorization", format!("Bearer {token}"));
 
         for (k, v) in extra_headers {
             req = req.header(*k, *v);
@@ -350,34 +442,108 @@ impl SupabaseClient {
         Ok(serde_json::from_str(&text)?)
     }
 
+    async fn send_json<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        url: &str,
+        body: Option<&Value>,
+        extra_headers: &[(&str, &str)],
+    ) -> Result<T> {
+        let used_token = self.bearer_token();
+        match self
+            .send_json_once(method.clone(), url, body, extra_headers, Some(&used_token))
+            .await
+        {
+            Ok(val) => Ok(val),
+            Err(err) if is_jwt_expired_error(&err) && self.has_refresh_token() => {
+                self.refresh_session_if_needed(&used_token).await?;
+                self.send_json_once(method, url, body, extra_headers, None)
+                    .await
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     // --- Auth ---
 
     pub async fn sign_up_email(&self, email: &str, password: &str) -> Result<SupabaseSession> {
         let url = format!("{}/signup", self.config.auth_url());
         let body = serde_json::json!({ "email": email, "password": password });
-        let session: SupabaseSession = self.send_json(Method::POST, &url, Some(&body), &[]).await?;
+        let session: SupabaseSession = self
+            .send_json_once(Method::POST, &url, Some(&body), &[], Some(&self.config.anon_key))
+            .await?;
         self.import_session(session.clone());
+        self.notify_session(&session);
         Ok(session)
     }
 
     pub async fn sign_in_email(&self, email: &str, password: &str) -> Result<SupabaseSession> {
         let url = format!("{}/token?grant_type=password", self.config.auth_url());
         let body = serde_json::json!({ "email": email, "password": password });
-        let session: SupabaseSession = self.send_json(Method::POST, &url, Some(&body), &[]).await?;
+        let session: SupabaseSession = self
+            .send_json_once(Method::POST, &url, Some(&body), &[], Some(&self.config.anon_key))
+            .await?;
         self.import_session(session.clone());
+        self.notify_session(&session);
         Ok(session)
     }
 
-    pub async fn refresh_session(&self) -> Result<SupabaseSession> {
+    async fn refresh_session_locked(&self) -> Result<SupabaseSession> {
         let refresh_token = self
             .current_session()
             .and_then(|s| s.refresh_token)
+            .filter(|t| !t.trim().is_empty())
             .ok_or(SupabaseError::NotAuthenticated)?;
         let url = format!("{}/token?grant_type=refresh_token", self.config.auth_url());
         let body = serde_json::json!({ "refresh_token": refresh_token });
-        let session: SupabaseSession = self.send_json(Method::POST, &url, Some(&body), &[]).await?;
+        let session: SupabaseSession = self
+            .send_json_once(
+                Method::POST,
+                &url,
+                Some(&body),
+                &[],
+                Some(&self.config.anon_key),
+            )
+            .await?;
         self.import_session(session.clone());
+        self.notify_session(&session);
         Ok(session)
+    }
+
+    pub async fn refresh_session_if_needed(&self, stale_access_token: &str) -> Result<SupabaseSession> {
+        let _guard = self.refresh_lock.lock().await;
+        if let Some(current) = self.current_session()
+            && current.access_token != stale_access_token
+        {
+            return Ok(current);
+        }
+        self.refresh_session_locked().await
+    }
+
+    pub async fn refresh_session(&self) -> Result<SupabaseSession> {
+        let _guard = self.refresh_lock.lock().await;
+        self.refresh_session_locked().await
+    }
+
+    pub async fn ensure_fresh_session(&self) -> Result<()> {
+        let Some(sess) = self.current_session() else {
+            return Ok(());
+        };
+        let has_refresh = sess
+            .refresh_token
+            .as_deref()
+            .is_some_and(|t| !t.trim().is_empty());
+        if !has_refresh {
+            return Ok(());
+        }
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if is_jwt_expiring_soon_at(&sess.access_token, now_secs, 60) {
+            self.refresh_session_if_needed(&sess.access_token).await?;
+        }
+        Ok(())
     }
 
     pub async fn get_user(&self) -> Result<SupabaseUser> {
@@ -713,6 +879,7 @@ impl SupabaseClient {
             session.user = Some(user);
             self.import_session(session.clone());
         }
+        self.notify_session(&session);
         Ok(session)
     }
 
@@ -729,24 +896,18 @@ impl SupabaseClient {
 
     // --- Storage ---
 
-    pub async fn upload_object(
+    async fn upload_object_once(
         &self,
-        bucket: &str,
-        object_path: &str,
+        url: &str,
         bytes: Vec<u8>,
         content_type: &str,
+        token: &str,
     ) -> Result<Value> {
-        let url = format!(
-            "{}/object/{}/{}",
-            self.config.storage_url(),
-            bucket.trim_matches('/'),
-            object_path.trim_start_matches('/')
-        );
         let resp = self
             .http
             .post(url)
             .header("apikey", &self.config.anon_key)
-            .header("Authorization", format!("Bearer {}", self.bearer_token()))
+            .header("Authorization", format!("Bearer {token}"))
             .header("Content-Type", content_type)
             .header("x-upsert", "true")
             .body(bytes)
@@ -763,18 +924,41 @@ impl SupabaseClient {
         Ok(serde_json::from_str(&text)?)
     }
 
-    pub async fn download_object(&self, bucket: &str, object_path: &str) -> Result<Vec<u8>> {
+    pub async fn upload_object(
+        &self,
+        bucket: &str,
+        object_path: &str,
+        bytes: Vec<u8>,
+        content_type: &str,
+    ) -> Result<Value> {
         let url = format!(
             "{}/object/{}/{}",
             self.config.storage_url(),
             bucket.trim_matches('/'),
             object_path.trim_start_matches('/')
         );
+        let used_token = self.bearer_token();
+        match self
+            .upload_object_once(&url, bytes.clone(), content_type, &used_token)
+            .await
+        {
+            Ok(v) => Ok(v),
+            Err(err) if is_jwt_expired_error(&err) && self.has_refresh_token() => {
+                self.refresh_session_if_needed(&used_token).await?;
+                let fresh = self.bearer_token();
+                self.upload_object_once(&url, bytes, content_type, &fresh)
+                    .await
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn download_object_once(&self, url: &str, token: &str) -> Result<Vec<u8>> {
         let resp = self
             .http
             .get(url)
             .header("apikey", &self.config.anon_key)
-            .header("Authorization", format!("Bearer {}", self.bearer_token()))
+            .header("Authorization", format!("Bearer {token}"))
             .send()
             .await?;
         let status = resp.status();
@@ -785,6 +969,25 @@ impl SupabaseClient {
             });
         }
         Ok(resp.bytes().await?.to_vec())
+    }
+
+    pub async fn download_object(&self, bucket: &str, object_path: &str) -> Result<Vec<u8>> {
+        let url = format!(
+            "{}/object/{}/{}",
+            self.config.storage_url(),
+            bucket.trim_matches('/'),
+            object_path.trim_start_matches('/')
+        );
+        let used_token = self.bearer_token();
+        match self.download_object_once(&url, &used_token).await {
+            Ok(bytes) => Ok(bytes),
+            Err(err) if is_jwt_expired_error(&err) && self.has_refresh_token() => {
+                self.refresh_session_if_needed(&used_token).await?;
+                let fresh = self.bearer_token();
+                self.download_object_once(&url, &fresh).await
+            }
+            Err(err) => Err(err),
+        }
     }
 }
 
@@ -800,5 +1003,27 @@ mod tests {
             cfg.realtime_ws_url().unwrap(),
             "wss://example.supabase.co/realtime/v1/websocket?apikey=anon123&vsn=1.0.0&nuvio_realtime=1"
         );
+    }
+
+    #[test]
+    fn detects_jwt_expiration_and_pgrst303() {
+        // {"alg":"HS256","typ":"JWT"}.{"sub":"u1","exp":2000000000}.sig
+        let token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1MSIsImV4cCI6MjAwMDAwMDAwMH0.sig";
+        assert_eq!(jwt_exp_unix(token), Some(2_000_000_000));
+        assert!(!is_jwt_expiring_soon_at(token, 1_999_999_900, 60));
+        assert!(is_jwt_expiring_soon_at(token, 1_999_999_950, 60));
+        assert!(is_jwt_expiring_soon_at(token, 2_000_000_010, 60));
+
+        let err = SupabaseError::Api {
+            status: 401,
+            body: r#"{"code":"PGRST303","details":null,"hint":null,"message":"JWT expired"}"#
+                .to_string(),
+        };
+        assert!(is_jwt_expired_error(&err));
+        let other = SupabaseError::Api {
+            status: 403,
+            body: "forbidden".to_string(),
+        };
+        assert!(!is_jwt_expired_error(&other));
     }
 }

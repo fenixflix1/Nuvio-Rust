@@ -1,0 +1,20 @@
+{
+  "id": "com.nuvio.tv",
+  "version": "1.0.0",
+  "vendor": "Nuvio",
+  "type": "web",
+  "main": "index.html",
+  "title": "Nuvio",
+  "icon": "assets/icon80.png",
+  "largeIcon": "assets/icon130.png",
+  "bgColor": "#000000",
+  "iconColor": "#000000",
+  "disableBackHistoryAPI": true,
+  "supportsAudioGuidance": false,
+  "handlesRelaunch": false,
+  "requiredPermissions": [
+    "time.query",
+    "application.operation",
+    "com.nuvio.tv.service.operation"
+  ]
+}

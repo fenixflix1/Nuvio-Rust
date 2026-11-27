@@ -1144,6 +1144,7 @@ impl PartyRuntime {
                 if party_id.is_empty() || member_id.is_empty() {
                     break;
                 }
+                let _ = rt_client.ensure_fresh_session().await;
                 let token = rt_client.current_session().map(|s| s.access_token);
                 let conn_res =
                     RealtimeConnection::connect(rt_client.config(), token.as_deref()).await;
@@ -1368,10 +1369,20 @@ impl PartyRuntime {
 }
 
 async fn rpc(client: &SupabaseClient, name: &str, params: Value) -> Result<Value, String> {
-    client
-        .rpc::<Value>(name, &params)
-        .await
-        .map_err(|e| format!("{e}"))
+    client.rpc::<Value>(name, &params).await.map_err(|e| {
+        let msg = format!("{e}");
+        let lower = msg.to_ascii_lowercase();
+        if msg.contains("PGRST303")
+            || lower.contains("jwt expired")
+            || lower.contains("invalid_grant")
+            || lower.contains("refresh token")
+            || lower.contains("not authenticated")
+        {
+            "Sua sessão expirou. Saia e entre novamente na sua conta Nuvio.".to_string()
+        } else {
+            msg
+        }
+    })
 }
 
 fn party_error_message(code: &str) -> String {

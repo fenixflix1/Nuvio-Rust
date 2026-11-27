@@ -191,6 +191,9 @@ struct HostInner {
 
 const JS_POLYFILL: &str = r##"
 var global = globalThis;
+globalThis.SCRAPER_ID = __get_scraper_id();
+try { globalThis.SCRAPER_SETTINGS = JSON.parse(__get_scraper_settings() || "{}"); } catch (_) { globalThis.SCRAPER_SETTINGS = {}; }
+if (typeof globalThis.TMDB_API_KEY === "undefined") { globalThis.TMDB_API_KEY = __get_tmdb_api_key(); }
 var console = {
   log: function() { __native_log("info", Array.prototype.slice.call(arguments).join(" ")); },
   info: function() { __native_log("info", Array.prototype.slice.call(arguments).join(" ")); },
@@ -520,6 +523,63 @@ impl PluginRuntime {
         )
     }
 
+    pub async fn get_settings_layout(
+        code: String,
+        scraper_id: String,
+        settings_json: String,
+        tmdb_api_key: String,
+    ) -> Result<String> {
+        let _permit = PLUGIN_SEMAPHORE
+            .acquire()
+            .await
+            .map_err(|e| PluginError::Js(e.to_string()))?;
+
+        tokio::task::spawn_blocking(move || {
+            Self::get_settings_layout_sync(&code, &scraper_id, &settings_json, &tmdb_api_key)
+        })
+        .await
+        .map_err(|e| PluginError::Js(format!("Plugin worker join error: {e}")))?
+    }
+
+    pub fn get_settings_layout_sync(
+        code: &str,
+        scraper_id: &str,
+        settings_json: &str,
+        tmdb_api_key: &str,
+    ) -> Result<String> {
+        let call_script = r#"
+(function() {
+  var fn = (typeof module !== "undefined" && module.exports && typeof module.exports.onSettings === "function")
+    ? module.exports.onSettings
+    : (typeof onSettings === "function" ? onSettings : null);
+  if (!fn) {
+    __capture_result("[]");
+    return;
+  }
+  try {
+    var res = fn();
+    if (res && typeof res.then === "function") {
+      res.then(function(layout) { __capture_result(JSON.stringify(layout || [])); })
+         .catch(function() { __capture_result("[]"); });
+    } else {
+      __capture_result(JSON.stringify(res || []));
+    }
+  } catch (_) {
+    __capture_result("[]");
+  }
+})();
+"#;
+        Self::run_qjs_script(
+            code,
+            scraper_id,
+            settings_json,
+            tmdb_api_key,
+            "{}",
+            PluginExecOptions::default(),
+            call_script,
+        )
+    }
+
     pub fn execute_sync_with_options(
         code: &str,
         scraper_id: &str,
@@ -528,36 +588,7 @@ impl PluginRuntime {
         args: &PluginCallArgs,
         exec_opts: PluginExecOptions,
     ) -> Result<Vec<PluginStreamResult>> {
-        let rt = Runtime::new().map_err(|e| PluginError::Js(e.to_string()))?;
-        rt.set_memory_limit(128 * 1024 * 1024);
-        rt.set_max_stack_size(2 * 1024 * 1024);
-
-        let deadline = Instant::now() + PLUGIN_EXEC_DEADLINE;
-        rt.set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)));
-
-        let ctx = Context::full(&rt).map_err(|e| PluginError::Js(e.to_string()))?;
-        let (tx, rx) = std::sync::mpsc::channel::<HostEvent>();
-
-        let host = Rc::new(RefCell::new(HostInner {
-            scraper_id: scraper_id.to_string(),
-            settings_json: settings_json.to_string(),
-            tmdb_api_key: tmdb_api_key.to_string(),
-            call_args_json: serde_json::to_string(args)?,
-            captured_result: None,
-            dom: DomBridge::new(),
-            exec_opts,
-            next_async_id: 1,
-            in_flight_fetches: HashSet::new(),
-            active_timers: HashSet::new(),
-            event_tx: tx,
-        }));
-
-        ctx.with(|qctx| -> Result<()> {
-            register_host_functions(&qctx, Rc::clone(&host))?;
-            eval_qjs(&qctx, JS_POLYFILL)?;
-            eval_qjs(&qctx, code)?;
-
-            let call_script = r#"
+        let call_script = r#"
 (function() {
   var fn = (typeof getStreams === "function")
     ? getStreams
@@ -578,6 +609,57 @@ impl PluginRuntime {
   }
 })();
 "#;
+        let call_args_json = serde_json::to_string(args)?;
+        let raw = Self::run_qjs_script(
+            code,
+            scraper_id,
+            settings_json,
+            tmdb_api_key,
+            &call_args_json,
+            exec_opts,
+            call_script,
+        )?;
+        let streams: Vec<PluginStreamResult> = serde_json::from_str(&raw).unwrap_or_default();
+        Ok(streams)
+    }
+
+    fn run_qjs_script(
+        code: &str,
+        scraper_id: &str,
+        settings_json: &str,
+        tmdb_api_key: &str,
+        call_args_json: &str,
+        exec_opts: PluginExecOptions,
+        call_script: &str,
+    ) -> Result<String> {
+        let rt = Runtime::new().map_err(|e| PluginError::Js(e.to_string()))?;
+        rt.set_memory_limit(128 * 1024 * 1024);
+        rt.set_max_stack_size(2 * 1024 * 1024);
+
+        let deadline = Instant::now() + PLUGIN_EXEC_DEADLINE;
+        rt.set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)));
+
+        let ctx = Context::full(&rt).map_err(|e| PluginError::Js(e.to_string()))?;
+        let (tx, rx) = std::sync::mpsc::channel::<HostEvent>();
+
+        let host = Rc::new(RefCell::new(HostInner {
+            scraper_id: scraper_id.to_string(),
+            settings_json: settings_json.to_string(),
+            tmdb_api_key: tmdb_api_key.to_string(),
+            call_args_json: call_args_json.to_string(),
+            captured_result: None,
+            dom: DomBridge::new(),
+            exec_opts,
+            next_async_id: 1,
+            in_flight_fetches: HashSet::new(),
+            active_timers: HashSet::new(),
+            event_tx: tx,
+        }));
+
+        ctx.with(|qctx| -> Result<()> {
+            register_host_functions(&qctx, Rc::clone(&host))?;
+            eval_qjs(&qctx, JS_POLYFILL)?;
+            eval_qjs(&qctx, code)?;
             eval_qjs(&qctx, call_script)?;
             Ok(())
         })?;
@@ -634,13 +716,11 @@ impl PluginRuntime {
             drain_pending_jobs(&rt);
         }
 
-        let raw = host
+        Ok(host
             .borrow_mut()
             .captured_result
             .take()
-            .unwrap_or_else(|| "[]".to_string());
-        let streams: Vec<PluginStreamResult> = serde_json::from_str(&raw).unwrap_or_default();
-        Ok(streams)
+            .unwrap_or_else(|| "[]".to_string()))
     }
 }
 
@@ -1192,5 +1272,33 @@ mod tests {
         )
         .unwrap();
         assert!(u3.contains("api_key=INJECTED"));
+    }
+
+    #[test]
+    fn exposes_scraper_settings_and_on_settings_layout() {
+        let code = r#"
+            function onSettings() {
+                return [
+                    { type: 'select', key: 'quality', label: 'Qualidade', defaultValue: '1080p', options: [{ label: '1080p', value: '1080p' }] },
+                    { type: 'toggle', key: 'autoFallback', label: 'Usar melhor qualidade', defaultValue: true }
+                ];
+            }
+            function getStreams() {
+                return [{ name: SCRAPER_ID + ':' + (SCRAPER_SETTINGS.quality || 'none'), url: 'https://cdn.example/s.m3u8', quality: SCRAPER_SETTINGS.quality }];
+            }
+        "#;
+        let layout_raw = PluginRuntime::get_settings_layout_sync(code, "demo", "{}", "").unwrap();
+        let layout: serde_json::Value = serde_json::from_str(&layout_raw).unwrap();
+        assert_eq!(layout.as_array().unwrap().len(), 2);
+
+        let args = PluginCallArgs {
+            tmdb_id: "603".into(),
+            media_type: "movie".into(),
+            season: None,
+            episode: None,
+        };
+        let streams = PluginRuntime::execute_sync(code, "demo", r#"{"quality":"4K"}"#, "", &args).unwrap();
+        assert_eq!(streams[0].name.as_deref(), Some("demo:4K"));
+        assert_eq!(streams[0].quality.as_deref(), Some("4K"));
     }
 }

@@ -1,0 +1,9 @@
+{
+  "id": "com.nuvio.tv.service",
+  "description": "Nuvio webOS Helper Service",
+  "services": [
+    {
+      "name": "com.nuvio.tv.service"
+    }
+  ]
+}

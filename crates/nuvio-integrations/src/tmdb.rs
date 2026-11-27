@@ -78,6 +78,11 @@ impl TmdbClient {
         .await
     }
 
+    /// Plain TV details without appended resources: the fast path for schedules.
+    pub async fn tv(&self, tmdb_id: u64) -> Result<Value> {
+        self.get_resource(&format!("tv/{tmdb_id}"), "").await
+    }
+
     pub async fn season(&self, series: u64, season: u32) -> Result<Value> {
         self.get_resource(&format!("tv/{series}/season/{season}"), "")
             .await

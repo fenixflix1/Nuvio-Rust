@@ -26,7 +26,38 @@ pub struct PluginScraperItem {
     pub filename: String,
     pub supported_types: Vec<String>,
     pub enabled: bool,
+    #[serde(default)]
+    pub has_settings: bool,
     pub code: String,
+}
+
+fn has_on_settings_hint(code: &str) -> bool {
+    code.contains("function onSettings")
+        || code.contains(".onSettings")
+        || code.contains("onSettings =")
+        || code.contains("onSettings=")
+        || code.contains("onSettings:")
+}
+
+pub fn load_scraper_settings(kv: &KvStore, scraper_id: &str) -> String {
+    kv.namespace("plugins")
+        .get_string(&format!("settings:{scraper_id}"))
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "{}".to_string())
+}
+
+pub fn save_scraper_settings(
+    kv: &KvStore,
+    scraper_id: &str,
+    settings_json: &str,
+) -> Result<(), String> {
+    let parsed: Value = serde_json::from_str(settings_json).map_err(|e| e.to_string())?;
+    let normalized = serde_json::to_string(&parsed).map_err(|e| e.to_string())?;
+    kv.namespace("plugins")
+        .put_string(&format!("settings:{scraper_id}"), Some(&normalized))
+        .map_err(|e| e.to_string())
 }
 
 impl PluginScraperItem {
@@ -59,12 +90,19 @@ impl Default for PluginsState {
 }
 
 pub fn load_plugins_state(kv: &KvStore) -> PluginsState {
-    kv.namespace("plugins")
+    let mut state: PluginsState = kv
+        .namespace("plugins")
         .get_string("state_json")
         .ok()
         .flatten()
         .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    for s in &mut state.scrapers {
+        if !s.has_settings && has_on_settings_hint(&s.code) {
+            s.has_settings = true;
+        }
+    }
+    state
 }
 
 pub fn save_plugins_state(kv: &KvStore, state: &PluginsState) -> Result<(), String> {
@@ -190,6 +228,7 @@ pub async fn fetch_plugin_repository(
             .filter(|v: &Vec<String>| !v.is_empty())
             .unwrap_or_else(|| vec!["movie".to_string(), "tv".to_string()]);
         let default_enabled = obj.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+        let manifest_has_settings = obj.get("hasSettings").and_then(|v| v.as_bool()).unwrap_or(false);
         let prev_enabled = existing_scrapers
             .iter()
             .find(|s| s.id == id)
@@ -209,6 +248,7 @@ pub async fn fetch_plugin_repository(
             filename,
             supported_types,
             prev_enabled.unwrap_or(default_enabled),
+            manifest_has_settings,
         ));
     }
 
@@ -228,6 +268,7 @@ pub async fn fetch_plugin_repository(
                 .text()
                 .await
                 .ok()?;
+            let has_settings = entry.7 || has_on_settings_hint(&code);
             Some(PluginScraperItem {
                 id: entry.0,
                 repository_url: man_url,
@@ -237,6 +278,7 @@ pub async fn fetch_plugin_repository(
                 filename: entry.4,
                 supported_types: entry.5,
                 enabled: entry.6,
+                has_settings,
                 code,
             })
         }));
@@ -370,12 +412,13 @@ pub async fn run_scraper_for_stream(
     season: Option<i32>,
     episode: Option<i32>,
     tmdb_api_key: &str,
+    settings_json: &str,
 ) -> Result<Vec<PluginStreamResult>, String> {
     let norm_type = if media_type == "series" { "tv" } else { media_type };
     PluginRuntime::execute_plugin(
         scraper.code.clone(),
         scraper.id.clone(),
-        "{}".to_string(),
+        settings_json.to_string(),
         tmdb_api_key.to_string(),
         PluginCallArgs {
             tmdb_id: tmdb_id.to_string(),

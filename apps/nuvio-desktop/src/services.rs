@@ -766,10 +766,17 @@ pub async fn tmdb_season_episodes(
     }))).collect())
 }
 
+/// Upcoming episodes of every library series, for the release calendar.
+///
+/// `next_episode_to_air` only carries a single episode, so the season of that
+/// episode is fetched as well to return every remaining date. Both requests use
+/// the slim endpoints (no credits/images/videos) and run in parallel; `from`
+/// (YYYY-MM-DD) trims past episodes before they cross the IPC boundary.
 #[tauri::command]
 pub async fn tmdb_next_episodes(
     state: tauri::State<'_, crate::AppState>,
     series: Vec<u64>,
+    from: Option<String>,
 ) -> Result<Vec<Value>, String> {
     let s = crate::load_settings_inner(&state.kv);
     if !s.services.tmdb_enabled || s.tmdb_api_key.trim().is_empty() {
@@ -777,33 +784,92 @@ pub async fn tmdb_next_episodes(
     }
     let client = TmdbClient::new(s.tmdb_api_key, s.services.tmdb_language)
         .map_err(|_| "Falha ao configurar o TMDB")?;
+    let lower_bound = from.unwrap_or_default().trim().to_string();
     let mut ids: Vec<u64> = series.into_iter().take(120).collect();
     ids.sort_unstable();
     ids.dedup();
     let mut pending = ids.into_iter();
-    let mut tasks: tokio::task::JoinSet<Option<Value>> = tokio::task::JoinSet::new();
-    let spawn = |tasks: &mut tokio::task::JoinSet<Option<Value>>, id: u64| {
+    let mut tasks: tokio::task::JoinSet<Vec<Value>> = tokio::task::JoinSet::new();
+    let spawn = |tasks: &mut tokio::task::JoinSet<Vec<Value>>, id: u64| {
         let client = client.clone();
+        let from = lower_bound.clone();
         tasks.spawn(async move {
-            let data = client.details("tv", id).await.ok()?;
-            let ep = &data["next_episode_to_air"];
-            let released = ep["air_date"].as_str().unwrap_or("").to_string();
-            if released.is_empty() {
-                return None;
+            let mut out = Vec::new();
+            let Ok(data) = client.tv(id).await else {
+                return out;
+            };
+            let next = &data["next_episode_to_air"];
+            let Some(season_no) = next["season_number"].as_u64() else {
+                return out;
+            };
+            let next_date = next["air_date"].as_str().unwrap_or("");
+            let next_episode = next["episode_number"].as_u64().unwrap_or(0);
+            if next_date.is_empty() {
+                return out;
             }
-            Some(json!({
-                "tmdb_id": id,
-                "name": data["name"],
-                "season": ep["season_number"],
-                "episode": ep["episode_number"],
-                "title": ep["name"],
-                "overview": ep["overview"],
-                "released": released,
-                "poster": image(&data["poster_path"], "w342"),
-            }))
+            let mut has_dated = false;
+            let poster = image(&data["poster_path"], "w342");
+            let backdrop = image(&data["backdrop_path"], "w780");
+            let name = data["name"].clone();
+            if let Ok(season) = client.season(id, season_no as u32).await
+                && let Some(episodes) = season["episodes"].as_array()
+            {
+                for ep in episodes {
+                    let released = ep["air_date"].as_str().unwrap_or("");
+                    if released.is_empty() {
+                        // Episódio já listado no TMDB mas ainda sem data: entra na
+                        // agenda como "data a anunciar" em vez de desaparecer.
+                        if ep["episode_number"].as_u64().unwrap_or(0) > next_episode {
+                            out.push(json!({
+                                "tmdb_id": id,
+                                "name": &name,
+                                "season": ep["season_number"].as_u64().or(Some(season_no)),
+                                "episode": ep["episode_number"],
+                                "title": ep["name"],
+                                "overview": ep["overview"],
+                                "released": "",
+                                "undated": true,
+                                "poster": &poster,
+                                "backdrop": &backdrop,
+                            }));
+                        }
+                        continue;
+                    }
+                    if !from.is_empty() && released < from.as_str() {
+                        continue;
+                    }
+                    has_dated = true;
+                    out.push(json!({
+                        "tmdb_id": id,
+                        "name": &name,
+                        "season": ep["season_number"].as_u64().or(Some(season_no)),
+                        "episode": ep["episode_number"],
+                        "title": ep["name"],
+                        "overview": ep["overview"],
+                        "released": released,
+                        "poster": &poster,
+                        "backdrop": &backdrop,
+                    }));
+                }
+            }
+            if !has_dated {
+                // Temporada ainda não publicada no TMDB: mantém o episódio anunciado.
+                out.push(json!({
+                    "tmdb_id": id,
+                    "name": &name,
+                    "season": season_no,
+                    "episode": next["episode_number"],
+                    "title": next["name"],
+                    "overview": next["overview"],
+                    "released": next_date,
+                    "poster": &poster,
+                    "backdrop": &backdrop,
+                }));
+            }
+            out
         });
     };
-    for _ in 0..8 {
+    for _ in 0..10 {
         match pending.next() {
             Some(id) => spawn(&mut tasks, id),
             None => break,
@@ -811,20 +877,30 @@ pub async fn tmdb_next_episodes(
     }
     let mut out = Vec::new();
     while let Some(res) = tasks.join_next().await {
-        if let Ok(Some(value)) = res {
-            out.push(value);
+        if let Ok(mut values) = res {
+            out.append(&mut values);
         }
         if let Some(id) = pending.next() {
             spawn(&mut tasks, id);
         }
     }
     out.sort_by(|a, b| {
-        a["released"]
-            .as_str()
-            .unwrap_or("")
-            .cmp(b["released"].as_str().unwrap_or(""))
+        calendar_sort_key(a).cmp(calendar_sort_key(b)).then_with(|| {
+            a["name"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(b["name"].as_str().unwrap_or(""))
+        })
     });
     Ok(out)
+}
+
+/// Dated episodes first (oldest) and "data a anunciar" last.
+fn calendar_sort_key(episode: &Value) -> &str {
+    match episode["released"].as_str() {
+        Some(released) if !released.is_empty() => released,
+        _ => "9999-12-31",
+    }
 }
 
 #[tauri::command]

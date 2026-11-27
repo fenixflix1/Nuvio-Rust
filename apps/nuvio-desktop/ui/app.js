@@ -162,11 +162,22 @@ function contrastOnHex(hex) {
 }
 
 const ratingProviders = {
-  imdb: 'IMDb', tmdb: 'TMDB', tomatoes: 'Rotten Tomatoes', audience: 'Público (RT)',
-  metacritic: 'Metacritic', trakt: 'Trakt', letterboxd: 'Letterboxd', mal: 'MyAnimeList',
+  imdb: 'IMDb',
+  tmdb: 'TMDB',
+  tomatoes: 'Rotten Tomatoes',
+  metacritic: 'Metacritic',
+  trakt: 'Trakt',
+  letterboxd: 'Letterboxd',
+  audience: 'Nota do público',
+  mal: 'MyAnimeList',
 };
 document.getElementById('rating-providers').innerHTML = Object.entries(ratingProviders)
-  .map(([key, label]) => `<label><input type="checkbox" data-provider="${key}" /> ${label}</label>`).join('');
+  .map(([key, label]) => `
+    <label class="toggle-row">
+      <span>${label}</span>
+      <span class="nuvio-switch"><input type="checkbox" data-provider="${key}" /><span class="nuvio-switch-track"></span></span>
+    </label>`)
+  .join('');
 
 function discordActivity() {
   const prefs = appSettings?.services;
@@ -394,8 +405,10 @@ function setTab(tab) {
   syncDiscord();
   mainViewportEl.scrollTo({ top: 0 });
   if (tab === 'library') { refreshLibrary(); renderFollowingSection(); }
-  if (tab === 'search') renderRecentSearches();
-  if (tab === 'discover') syncDiscoverSelection();
+  if (tab === 'search') {
+    renderRecentSearches();
+    if (!discoverItems.length && discoverCatalogs.length) syncDiscoverSelection();
+  }
   if (tab === 'insights' && typeof loadProfileInsights === 'function') loadProfileInsights();
 }
 
@@ -612,6 +625,16 @@ async function handleAuthenticated(status) {
   }
 }
 
+function addonCatalogSignature(addons) {
+  return (addons || [])
+    .filter((a) => a.enabled)
+    .flatMap((a) => (a.manifest?.catalogs || [])
+      .filter((c) => !(c.extra || []).some((e) => e.name === 'search' && e.is_required))
+      .map((c) => `${a.manifest_url}|${c.type}|${c.id}`))
+    .slice(0, 18)
+    .join(';');
+}
+
 async function switchToProfile(idx, fromPicker) {
   if (switchingProfile) return;
   switchingProfile = true;
@@ -629,16 +652,17 @@ async function switchToProfile(idx, fromPicker) {
   if (typeof clearHomeCollections === 'function') clearHomeCollections();
   try {
     await invoke('select_profile', { profileIndex: idx });
-    await simklLoadProfile();
+    const homeTask = refreshHomeProgressive(false);
+    const simklTask = simklLoadProfile();
     await Promise.all([
+      homeTask,
+      simklTask,
       refreshWatchedKeys(),
       refreshLibraryState(),
       refreshFollowedPeople(),
       refreshAddons(),
       refreshPluginsState(),
       refreshContinueWatching(),
-      refreshHomeProgressive(),
-      fromPicker ? refreshDiagnostics() : Promise.resolve(),
     ]);
   } finally {
     switchingProfile = false;
@@ -670,6 +694,75 @@ document.getElementById('btn-profiles-signout').addEventListener('click', async 
   showView('view-auth');
 });
 
+function homeSnapshotKey() {
+  return `nuvio_home_snapshot_p${authState?.active_profile_index || 1}`;
+}
+
+function readHomeSnapshot() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(homeSnapshotKey()) || 'null');
+    return Array.isArray(parsed) && parsed.length ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeHomeSnapshot() {
+  try {
+    const list = Array.from(homeSectionsMap.values()).sort((a, b) => a.order - b.order);
+    if (!list.length) return;
+    localStorage.setItem(homeSnapshotKey(), JSON.stringify(list));
+  } catch {
+    // Quota/storage errors are non-fatal
+  }
+}
+
+function renderHomeSectionsChunked(shelvesContainer, sections, gen, onHeroReady) {
+  if (!sections || !sections.length) return;
+  const sorted = [...sections].sort((a, b) => a.order - b.order);
+
+  const applySection = (sec) => {
+    if (gen !== homeRunGen) return;
+    document.getElementById('home-loading-note')?.remove();
+    const prev = homeSectionsMap.get(sec.order);
+    const sameContent = prev && catalogSectionDigest(prev) === catalogSectionDigest(sec);
+    homeSectionsMap.set(sec.order, sec);
+
+    if (heroItems.length === 0) {
+      const candidates = sec.items.filter((i) => i.banner || i.poster).slice(0, 8);
+      if (candidates.length) {
+        heroItems = candidates;
+        renderHero();
+        if (onHeroReady) onHeroReady();
+      }
+    }
+
+    if (!sameContent || !shelvesContainer.querySelector(`.shelf-section[data-order="${sec.order}"]`)) {
+      appendShelfOrdered(shelvesContainer, sec);
+    }
+  };
+
+  // Paint hero + top 4 visible shelves immediately in frame 0, then remaining in chunks
+  const immediateCount = Math.min(4, sorted.length);
+  for (let i = 0; i < immediateCount; i += 1) {
+    applySection(sorted[i]);
+  }
+  if (sorted.length <= immediateCount) return;
+
+  let idx = immediateCount;
+  const pump = () => {
+    if (gen !== homeRunGen) return;
+    const end = Math.min(idx + 4, sorted.length);
+    for (; idx < end; idx += 1) {
+      applySection(sorted[idx]);
+    }
+    if (idx < sorted.length) {
+      requestAnimationFrame(pump);
+    }
+  };
+  requestAnimationFrame(pump);
+}
+
 async function enterMainApp(status) {
   if (libraryCollections) libraryCollections.open = false;
   clearAccountCollections();
@@ -677,24 +770,46 @@ async function enterMainApp(status) {
   showView('view-app');
   updateProfileUi();
   updateAccountSettingsUi();
-  if (status.signed_in && status.active_profile_index != null) {
-    try {
-      await invoke('select_profile', { profileIndex: status.active_profile_index });
-    } catch (error) {
-      console.error('Falha ao sincronizar os addons do perfil', error);
+  logUiTiming(`boot: vista principal aberta em +${Math.round(performance.now())} ms`);
+
+  // Renderiza o último snapshot local na hora enquanto busca/revalida em paralelo.
+  const cachedAddonsTask = invoke('list_addons').catch(() => []);
+  const homeTask = refreshHomeProgressive(false);
+  const cachedAddons = await cachedAddonsTask;
+  const preSyncSig = addonCatalogSignature(cachedAddons);
+  if (cachedAddons.length) renderAddonsList(cachedAddons);
+
+  const profileSyncTask = (status.signed_in && status.active_profile_index != null)
+    ? invoke('select_profile', { profileIndex: status.active_profile_index })
+      .then((synced) => {
+        renderAddonsList(synced);
+        if (addonCatalogSignature(synced) !== preSyncSig) {
+          return refreshHomeProgressive(true);
+        }
+      })
+      .catch((error) => {
+        console.error('Falha ao sincronizar os addons do perfil', error);
+      })
+    : refreshAddons();
+
+  const simklTask = simklLoadProfile().then(() => {
+    if (simklUses('library') || simklUses('progress')) {
+      return simklRefreshViews();
     }
-  }
-  await simklLoadProfile();
+  });
+
   await Promise.all([
+    homeTask,
+    profileSyncTask,
+    simklTask,
     refreshWatchedKeys(),
     refreshLibraryState(),
-    refreshFollowedPeople(),
-    refreshAddons(),
-    refreshPluginsState(),
     refreshContinueWatching(),
-    refreshHomeProgressive(),
-    refreshDiagnostics(),
   ]);
+  setTimeout(() => {
+    refreshFollowedPeople();
+    refreshPluginsState();
+  }, 60);
   if (appSettings?.services?.discord_enabled) {
     syncDiscord(true);
     setTimeout(() => syncDiscord(true), 3000);
@@ -813,29 +928,154 @@ document.querySelectorAll('.sidebar-item, .topnav-item').forEach((btn) => {
 });
 
 // --- WATCHED & LIBRARY STATE ---
+let mdblistLibraryCache = { lists: [], items: [], error: null };
+let mdblistProgressCache = { watchedKeys: [], cards: [], error: null };
+let mdblistProgressTask = null;
+let mdblistScrobbleQueue = Promise.resolve();
+
+function activeLibrarySource() {
+  const src = appSettings?.library_source;
+  if (src === 'mdblist') return 'mdblist';
+  if (src === 'simkl') return simklAccount?.connected ? 'simkl' : 'default';
+  if (src === 'default') return 'default';
+  if (simklAccount?.connected && simklAccount?.sources?.library === 'simkl') return 'simkl';
+  return 'default';
+}
+
+function activeProgressSource() {
+  const src = appSettings?.progress_source;
+  if (src === 'mdblist') return 'mdblist';
+  if (src === 'simkl') return simklAccount?.connected ? 'simkl' : 'default';
+  if (src === 'default') return 'default';
+  if (simklAccount?.connected && simklAccount?.sources?.progress === 'simkl') return 'simkl';
+  return 'default';
+}
+
+function mdblistMatchesCard(card, id) {
+  if (!card || !id) return false;
+  if (card.content_id === id) return true;
+  const ids = card.media_ids || {};
+  if (/^tt\d+$/.test(id)) return String(ids.imdb || '') === id;
+  const parts = /^(imdb|tmdb|tvdb|trakt):(.+)$/.exec(id);
+  return parts ? String(ids[parts[1]] || '') === parts[2] : false;
+}
+
+function clearMdblistState() {
+  mdblistLibraryCache = { lists: [], items: [], error: null };
+  mdblistProgressCache = { watchedKeys: [], cards: [], error: null };
+  mdblistProgressTask = null;
+}
+
+function refreshMdblistProgress(force = false) {
+  if (mdblistProgressTask && !force) return mdblistProgressTask;
+  const task = invoke('mdblist_progress_sync', { force: Boolean(force) })
+    .then((snap) => {
+      mdblistProgressCache = {
+        watchedKeys: Array.isArray(snap?.watched_keys) ? snap.watched_keys : [],
+        cards: Array.isArray(snap?.continue_watching) ? snap.continue_watching : [],
+        error: null,
+      };
+      return mdblistProgressCache;
+    })
+    .catch((e) => {
+      mdblistProgressCache = { watchedKeys: [], cards: [], error: String(e) };
+      throw e;
+    })
+    .finally(() => {
+      if (mdblistProgressTask === task) mdblistProgressTask = null;
+    });
+  mdblistProgressTask = task;
+  return task;
+}
+
+function mdblistSendScrobble(ctx, st, stop = false) {
+  if (activeProgressSource() !== 'mdblist' || !ctx?.contentId || !st || st.loading || !(st.duration_secs > 10)) return;
+  if (ctx.mediaType !== 'movie' && (ctx.season == null || ctx.episode == null)) return;
+  const action = stop || st.ended ? 'stop' : st.paused ? 'pause' : 'start';
+  const percent = Math.min(100, Math.max(0, (100 * st.position_secs) / st.duration_secs));
+  if (ctx.mdblistLastAction === 'stop') return mdblistScrobbleQueue;
+  if (ctx.mdblistLastAction === action && (action !== 'start' || Date.now() - (ctx.mdblistAt || 0) < 60000)) {
+    return;
+  }
+  ctx.mdblistAt = Date.now();
+  ctx.mdblistLastAction = action;
+  mdblistScrobbleQueue = mdblistScrobbleQueue.then(async () => {
+    if (activeProgressSource() !== 'mdblist') return;
+    await invoke('mdblist_scrobble', {
+      action,
+      mediaType: ctx.mediaType === 'movie' ? 'movie' : 'series',
+      id: ctx.contentId,
+      season: ctx.season ?? null,
+      episode: ctx.episode ?? null,
+      progress: percent,
+    });
+    if (action === 'stop') {
+      await refreshMdblistProgress(true).catch(() => {});
+      await Promise.all([refreshWatchedKeys(), refreshContinueWatching()]);
+      refreshPosterWatchedBadges();
+    }
+  }).catch((e) => {
+    if (ctx.mdblistLastAction === action) ctx.mdblistLastAction = null;
+    if (!ctx.mdblistErrorShown) {
+      ctx.mdblistErrorShown = true;
+      showToast('Falha ao enviar reprodução para o MDBList. ' + String(e));
+    }
+  });
+  return mdblistScrobbleQueue;
+}
+
 async function refreshWatchedKeys() {
   try {
-    const keys = simklUses('progress') ? simklWatchedKeys() : await invoke('list_watched_keys');
+    const source = activeProgressSource();
+    if (source === 'mdblist') {
+      await refreshMdblistProgress(false);
+      watchedSet = new Set(mdblistProgressCache.watchedKeys || []);
+      return;
+    }
+    const keys = source === 'simkl' ? simklWatchedKeys() : await invoke('list_watched_keys');
     watchedSet = new Set(keys || []);
   } catch {
     // Non-fatal
   }
 }
 
-async function refreshLibraryState() {
+async function refreshLibraryState(force = false) {
   try {
-    const items = simklUses('library') ? simklLibrary() : await invoke('pull_account_library');
+    const source = activeLibrarySource();
+    if (source === 'mdblist') {
+      const snap = await invoke('mdblist_library_sync', { force: Boolean(force) });
+      mdblistLibraryCache = {
+        lists: Array.isArray(snap?.lists) ? snap.lists : [],
+        items: Array.isArray(snap?.items) ? snap.items : [],
+        error: null,
+      };
+      libraryRawItems = mdblistLibraryCache.items;
+      librarySet = new Set(libraryRawItems.map((it) => libKey(it.content_id || it.id, it.content_type || it.type)));
+      for (const item of libraryRawItems) {
+        for (const [k, v] of Object.entries(item.media_ids || {})) {
+          if (v && k !== 'slug') {
+            librarySet.add(libKey(k === 'imdb' ? String(v) : `${k}:${v}`, item.content_type));
+          }
+        }
+      }
+      return;
+    }
+
+    mdblistLibraryCache = { lists: [], items: [], error: null };
+    const items = source === 'simkl' ? simklLibrary() : await invoke('pull_account_library');
     libraryRawItems = Array.isArray(items) ? items : [];
     librarySet = new Set(libraryRawItems.map((it) => libKey(it.content_id || it.id, it.content_type || it.type)));
-    if (simklUses('library')) {
+    if (source === 'simkl') {
       for (const item of libraryRawItems) {
-        for (const [source,id] of Object.entries(item.media.ids || {})) {
-          if (id && source !== 'slug') librarySet.add(libKey(source === 'imdb' ? id : source + ':' + id, item.content_type));
+        for (const [k,id] of Object.entries(item.media.ids || {})) {
+          if (id && k !== 'slug') librarySet.add(libKey(k === 'imdb' ? id : k + ':' + id, item.content_type));
         }
       }
     }
-  } catch {
+  } catch (e) {
+    mdblistLibraryCache = { lists: [], items: [], error: String(e) };
     libraryRawItems = [];
+    librarySet = new Set();
   }
 }
 
@@ -853,7 +1093,28 @@ async function toggleItemLibrary(meta) {
     added_at: Date.now(),
   };
   let saved;
-  if (simklUses('library')) {
+  const source = activeLibrarySource();
+  if (source === 'mdblist') {
+    saved = !librarySet.has(libKey(meta.id, meta.type));
+    const listSelect = document.getElementById('library-mdblist-list');
+    const selectedList = listSelect && !listSelect.classList.contains('hidden') ? listSelect.value : 'watchlist';
+    const targetList = selectedList === 'all' ? 'watchlist' : selectedList;
+    try {
+      await invoke('mdblist_library_mutate', {
+        listKey: targetList,
+        action: saved ? 'add' : 'remove',
+        mediaType: meta.type || 'movie',
+        id: meta.id,
+      });
+    } catch (e) {
+      showToast(String(e));
+      return !saved;
+    }
+    await refreshLibraryState(true);
+    showToast(saved ? 'Adicionado ao MDBList' : 'Removido do MDBList');
+    return saved;
+  }
+  if (source === 'simkl') {
     saved = !librarySet.has(libKey(meta.id,meta.type));
     if (!saved && !(await confirmDialog('Remover do Simkl?', 'O Simkl também removerá o histórico deste título ao retirá-lo da sua lista.'))) return true;
     try { await simklMutate(saved ? 'library_add' : 'remove', meta.id, meta.type, saved ? {to:'plantowatch'} : {}); }
@@ -867,7 +1128,28 @@ async function toggleItemLibrary(meta) {
 }
 
 async function toggleItemWatched(contentId, contentType, title, season = null, episode = null) {
-  if (simklUses('progress')) {
+  const progressSource = activeProgressSource();
+  if (progressSource === 'mdblist') {
+    const key = epWatchKey(contentId, season, episode);
+    const watched = !watchedSet.has(key);
+    try {
+      await invoke('mdblist_watched_mutate', {
+        remove: !watched,
+        mediaType: contentType === 'movie' ? 'movie' : 'series',
+        id: contentId,
+        season: season ?? null,
+        episode: episode ?? null,
+      });
+      await refreshMdblistProgress(true);
+      await refreshWatchedKeys();
+      showToast(watched ? 'Marcado como assistido no MDBList' : 'Desmarcado como assistido no MDBList');
+      return watched;
+    } catch (e) {
+      showToast(String(e));
+      return !watched;
+    }
+  }
+  if (progressSource === 'simkl') {
     const key = epWatchKey(contentId,season,episode);
     const watched = !watchedSet.has(key);
     const fields = season != null && episode != null
@@ -901,6 +1183,84 @@ function hideHoverPreview() {
   document.getElementById('hover-preview-popup')?.classList.add('hidden');
 }
 
+function hoverTypeLabel(mediaType) {
+  const t = String(mediaType || '').toLowerCase();
+  if (t === 'series' || t === 'tv') return 'Series';
+  if (t === 'anime') return 'Anime';
+  if (t === 'movie') return 'Filme';
+  return t ? t.charAt(0).toUpperCase() + t.slice(1) : '';
+}
+
+function renderHoverPreviewContent(popup, item, meta) {
+  const m = meta || {};
+  const inLib = librarySet.has(libKey(item.id, item.type));
+  const isWatched = watchedSet.has(item.id);
+  const horizontalArtwork = m.background || m.banner || m.landscapePoster || item.banner || '';
+  const artwork = horizontalArtwork || item.poster || m.poster || '';
+  const isPosterFallback = !horizontalArtwork && Boolean(artwork);
+  const logo = m.logo || item.logo || '';
+  const title = m.name || item.name || '';
+  const release = m.releaseInfo || item.release_info || '';
+  const imdb = m.imdbRating || item.imdb_rating || '';
+  const genres = Array.isArray(m.genres) && m.genres.length
+    ? m.genres
+    : (Array.isArray(item.genres) ? item.genres : []);
+  const desc = m.description || item.description || '';
+  const metaParts = [
+    hoverTypeLabel(m.type || item.type),
+    release,
+    imdb ? `IMDb ${imdb}` : '',
+  ].filter(Boolean);
+
+  const icoCheck = '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="m9 16.2-3.5-3.5 1.4-1.4L9 13.4l7.1-7.1 1.4 1.4z"/></svg>';
+  const icoPlus = '<svg viewBox="0 0 24 24" width="17" height="17"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>';
+  const icoArrow = '<svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z"/></svg>';
+
+  popup.innerHTML = `
+    <div class="hover-preview-media">
+      ${artwork ? `<img class="hover-preview-bg ${isPosterFallback ? 'is-poster-fallback' : ''}" src="${esc(artwork)}" alt="" />` : ''}
+      <div class="hover-preview-media-scrim"></div>
+      ${isWatched ? `<span class="hover-preview-watched-pill" title="Assistido">${icoCheck}</span>` : ''}
+      ${logo ? `<img class="hover-preview-logo" src="${esc(logo)}" alt="${esc(title)}" />` : `<div class="hover-preview-media-title">${esc(title)}</div>`}
+    </div>
+    <div class="hover-preview-body">
+      ${metaParts.length ? `<div class="hover-preview-meta-line">${esc(metaParts.join(' • '))}</div>` : ''}
+      ${genres.length ? `<div class="hover-preview-genres">${esc(genres.slice(0, 3).join(' • '))}</div>` : ''}
+      ${desc ? `<div class="hover-preview-desc">${esc(desc)}</div>` : ''}
+      <div class="hover-preview-actions">
+        <button class="btn-accent hover-preview-primary-btn" id="hp-open-btn" type="button"><span>Ver detalhes</span>${icoArrow}</button>
+        <button class="hover-preview-icon-btn ${isWatched ? 'is-active' : ''}" id="hp-watch-btn" type="button" title="${isWatched ? 'Desmarcar assistido' : 'Marcar como assistido'}" aria-label="Marcar como assistido">${icoCheck}</button>
+        <button class="hover-preview-icon-btn ${inLib ? 'is-active' : ''}" id="hp-lib-btn" type="button" title="${inLib ? 'Remover da biblioteca' : 'Adicionar à biblioteca'}" aria-label="Biblioteca">${inLib ? icoCheck : icoPlus}</button>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('hp-open-btn').onclick = () => {
+    hideHoverPreview();
+    openDetailsPage(item);
+  };
+  document.getElementById('hp-watch-btn').onclick = async (e) => {
+    const btn = e.currentTarget;
+    const watched = await toggleItemWatched(item.id, item.type, title);
+    btn.classList.toggle('is-active', watched);
+    btn.title = watched ? 'Desmarcar assistido' : 'Marcar como assistido';
+    const mediaEl = popup.querySelector('.hover-preview-media');
+    const existingPill = mediaEl?.querySelector('.hover-preview-watched-pill');
+    if (watched && mediaEl && !existingPill) {
+      mediaEl.insertAdjacentHTML('beforeend', `<span class="hover-preview-watched-pill" title="Assistido">${icoCheck}</span>`);
+    } else if (!watched && existingPill) {
+      existingPill.remove();
+    }
+  };
+  document.getElementById('hp-lib-btn').onclick = async (e) => {
+    const btn = e.currentTarget;
+    const saved = await toggleItemLibrary(item);
+    btn.classList.toggle('is-active', saved);
+    btn.innerHTML = saved ? icoCheck : icoPlus;
+    btn.title = saved ? 'Remover da biblioteca' : 'Adicionar à biblioteca';
+  };
+}
+
 function showHoverPreviewForCard(cardEl, item) {
   if (!appSettings?.hover_preview_enabled) return;
   const popup = document.getElementById('hover-preview-popup');
@@ -909,42 +1269,26 @@ function showHoverPreviewForCard(cardEl, item) {
   let left = rect.left + rect.width / 2 - pw / 2;
   left = Math.max(18, Math.min(window.innerWidth - pw - 18, left));
   let top = rect.top - 18;
-  if (top + 320 > window.innerHeight - 16) {
-    top = Math.max(16, window.innerHeight - 336);
+  if (top + 350 > window.innerHeight - 16) {
+    top = Math.max(16, window.innerHeight - 366);
   }
-  const inLib = librarySet.has(libKey(item.id, item.type));
-  const artwork = item.banner || item.poster || '';
 
   popup.style.left = `${left}px`;
   popup.style.top = `${top}px`;
-  popup.innerHTML = `
-    <div class="hover-preview-media">
-      ${artwork ? `<img src="${esc(artwork)}" alt="" />` : ''}
-      <div class="hover-preview-media-scrim"></div>
-    </div>
-    <div class="hover-preview-body">
-      ${item.logo ? `<img class="hover-preview-logo" src="${esc(item.logo)}" alt="${esc(item.name)}" />` : `<strong style="font-size:15px;">${esc(item.name)}</strong>`}
-      <div class="hero-meta-row" style="margin-bottom:2px;font-size:12px;">
-        ${item.imdb_rating ? `<span class="imdb-chip"><img src="assets/rating_imdb.png" alt="IMDb" /> ${esc(item.imdb_rating)}</span>` : ''}
-        ${item.release_info ? `<span>${esc(item.release_info)}</span>` : ''}
-      </div>
-      ${item.description ? `<div class="hover-preview-desc">${esc(item.description)}</div>` : ''}
-      <div class="hover-preview-actions">
-        <button class="btn-accent" id="hp-open-btn" style="padding:7px 14px;font-size:12px;">Ver Detalhes</button>
-        <button class="btn-ghost" id="hp-lib-btn" style="padding:7px 12px;font-size:12px;">${inLib ? '✓ Na Biblioteca' : '+ Biblioteca'}</button>
-      </div>
-    </div>
-  `;
+
+  const cachedMeta = getCachedMetaDetails(item.type, item.id);
+  renderHoverPreviewContent(popup, item, cachedMeta);
   popup.classList.remove('hidden');
 
-  document.getElementById('hp-open-btn').onclick = () => {
-    hideHoverPreview();
-    openDetailsPage(item);
-  };
-  document.getElementById('hp-lib-btn').onclick = async (e) => {
-    const saved = await toggleItemLibrary(item);
-    e.currentTarget.textContent = saved ? '✓ Na Biblioteca' : '+ Biblioteca';
-  };
+  if (!cachedMeta && item.id && item.type) {
+    fetchMetaDetailsCached(item.type, item.id)
+      .then((meta) => {
+        if (meta && hoverPreviewItem === item && !popup.classList.contains('hidden')) {
+          renderHoverPreviewContent(popup, item, meta);
+        }
+      })
+      .catch(() => {});
+  }
 }
 
 const hoverPopupEl = document.getElementById('hover-preview-popup');
@@ -1052,7 +1396,17 @@ async function refreshContinueWatching() {
   wrap.classList.add('hidden');
   wrap.innerHTML = '';
 
-  if (simklUses('progress')) {
+  const progressSource = activeProgressSource();
+  if (progressSource === 'mdblist') {
+    try {
+      await refreshMdblistProgress(false);
+      (mdblistProgressCache.cards || []).forEach((card, index) => cwItemsMap.set(index, card));
+      renderContinueWatchingRow();
+      return;
+    } catch (error) {
+      console.warn('[continue-watching] falha ao carregar MDBList:', error);
+    }
+  } else if (progressSource === 'simkl') {
     const cards = simklProgressCards();
     // Simkl escolhido como fonte, mas sem snapshot sincronizado (conta
     // desconectada/token expirado): cai para o progresso do Nuvio.
@@ -1105,12 +1459,18 @@ function renderContinueWatchingRow() {
           subParts.push(c.content_type === 'series' ? 'Série' : 'Filme');
         }
         if (c.episode_title) subParts.push(c.episode_title);
-        const rawImg = style === 'poster' ? (c.poster || c.artwork || '') : (c.artwork || c.poster || '');
+        // Arte horizontal sempre que existir: o poster vertical dentro de um cartão
+        // 16:9 fica cortado e esticado.
+        const horizontalArt = (c.artwork && c.artwork !== c.poster ? c.artwork : '') || c.background || '';
+        const rawImg = style === 'poster'
+          ? (c.poster || c.artwork || '')
+          : (horizontalArt || c.poster || c.artwork || '');
         const imgUrl = optimizePosterUrl(rawImg, style === 'poster' ? 342 : 500);
-        const blurred = appSettings?.blur_unwatched_episodes && c.season != null ? 'blurred-img' : '';
+        // A arte do cartão é o episódio que estás a retomar (não é spoiler) e
+        // deve aparecer nítida mesmo com "Desfocar miniaturas" ligado.
         return `
           <button class="cw-card ${styleClass}" data-cw-idx="${idx}">
-            ${imgUrl ? `<img class="${blurred}" src="${esc(imgUrl)}" alt="${esc(c.title)}" loading="lazy" decoding="async" draggable="false" />` : ''}
+            ${imgUrl ? `<img src="${esc(imgUrl)}" alt="${esc(c.title)}" loading="lazy" decoding="async" draggable="false" />` : ''}
             <div class="cw-scrim"></div>
             ${c.remaining_minutes ? `<span class="cw-badge-top">Faltam ${c.remaining_minutes}m</span>` : ''}
             <div class="cw-meta">
@@ -1173,7 +1533,23 @@ function renderContinueWatchingRow() {
           label: 'Remover de Continuar Assistindo',
           danger: true,
           onClick: async () => {
-            if (simklUses('progress')) {
+            const progressSource = activeProgressSource();
+            if (progressSource === 'mdblist') {
+              try {
+                await invoke('mdblist_scrobble', {
+                  action: 'clear',
+                  mediaType: c.content_type === 'movie' ? 'movie' : 'series',
+                  id: c.content_id,
+                  season: c.season ?? null,
+                  episode: c.episode ?? null,
+                  progress: null,
+                });
+                await refreshMdblistProgress(true);
+                await refreshContinueWatching();
+              } catch (e) { showToast(String(e)); }
+              return;
+            }
+            if (progressSource === 'simkl') {
               try {await simklRequest('remove_progress', c.simkl_session); await simklSync(); await refreshContinueWatching();}
               catch(e) {showToast(String(e));}
               return;
@@ -1192,21 +1568,55 @@ function renderContinueWatchingRow() {
 }
 
 // --- HOME PROGRESSIVE LOADING ---
-async function refreshHomeProgressive() {
+// Tempos do arranque vão para o crash.log via comando `frontend_log`.
+function logUiTiming(message) {
+  invoke('frontend_log', { message }).catch(() => {});
+}
+
+let homeRunGen = 0;
+
+function catalogSectionDigest(sec) {
+  return `${sec.key}|${sec.title}|${(sec.items || []).map((i) => `${i.id}:${i.poster || ''}`).join(',')}`;
+}
+
+async function refreshHomeProgressive(force = false) {
+  const gen = ++homeRunGen;
+  const homeStartedAt = performance.now();
+  const sinceHome = () => Math.round(performance.now() - homeStartedAt);
+  logUiTiming(`home: inicio (pagina aberta ha ${Math.round(homeStartedAt)} ms)`);
   if (homeUnlistenSection) { homeUnlistenSection(); homeUnlistenSection = null; }
   if (homeUnlistenDone) { homeUnlistenDone(); homeUnlistenDone = null; }
 
   const heroContainer = document.getElementById('home-hero-container');
   const shelvesContainer = document.getElementById('home-catalogs-container');
-  homeSectionsMap.clear();
-  heroItems = [];
-  heroIdx = 0;
-  shelvesContainer.innerHTML = '<div class="muted" id="home-loading-note">Carregando catálogos…</div>';
+  const hadSections = homeSectionsMap.size > 0 && !force;
+  let heroLogged = false;
+  const logHeroOnce = () => {
+    if (!heroLogged) {
+      heroLogged = true;
+      logUiTiming(`home: hero em ${sinceHome()} ms`);
+    }
+  };
+
+  if (!hadSections) {
+    homeSectionsMap.clear();
+    heroItems = [];
+    heroIdx = 0;
+    const localSnap = !force ? readHomeSnapshot() : null;
+    if (localSnap) {
+      renderHomeSectionsChunked(shelvesContainer, localSnap, gen, logHeroOnce);
+    } else {
+      shelvesContainer.innerHTML = '<div class="muted" id="home-loading-note">Carregando catálogos…</div>';
+    }
+  }
   if (typeof refreshHomeCollections === 'function') refreshHomeCollections();
 
   homeUnlistenSection = await listen('home:section', (event) => {
+    if (gen !== homeRunGen) return;
     const sec = event.payload;
     document.getElementById('home-loading-note')?.remove();
+    const prev = homeSectionsMap.get(sec.order);
+    const sameContent = prev && catalogSectionDigest(prev) === catalogSectionDigest(sec);
     homeSectionsMap.set(sec.order, sec);
 
     if (heroItems.length === 0) {
@@ -1214,20 +1624,33 @@ async function refreshHomeProgressive() {
       if (candidates.length) {
         heroItems = candidates;
         renderHero();
+        logHeroOnce();
       }
     }
 
-    appendShelfOrdered(shelvesContainer, sec);
-  });
-
-  homeUnlistenDone = await listen('home:done', () => {
-    document.getElementById('home-loading-note')?.remove();
-    if (homeSectionsMap.size === 0) {
-      renderEmptyHome(heroContainer, shelvesContainer);
+    if (!sameContent || !shelvesContainer.querySelector(`.shelf-section[data-order="${sec.order}"]`)) {
+      appendShelfOrdered(shelvesContainer, sec);
     }
   });
 
-  const ack = await invoke('start_home_catalogs');
+  homeUnlistenDone = await listen('home:done', () => {
+    if (gen !== homeRunGen) return;
+    document.getElementById('home-loading-note')?.remove();
+    logUiTiming(`home: pronto em ${sinceHome()} ms (${homeSectionsMap.size} secoes)`);
+    if (homeSectionsMap.size === 0) {
+      renderEmptyHome(heroContainer, shelvesContainer);
+    } else {
+      writeHomeSnapshot();
+    }
+  });
+
+  const ack = await invoke('start_home_catalogs', { force: Boolean(force) });
+  if (gen !== homeRunGen) return;
+  if (ack.cached_sections?.length) {
+    renderHomeSectionsChunked(shelvesContainer, ack.cached_sections, gen, logHeroOnce);
+    writeHomeSnapshot();
+  }
+  logUiTiming(`home: pedido aceite em ${sinceHome()} ms (${ack.total} catalogos)`);
   if (ack.total === 0) {
     renderEmptyHome(heroContainer, shelvesContainer);
   }
@@ -1272,12 +1695,17 @@ function appendShelfOrdered(shelvesContainer, sec, sectionsMap = homeSectionsMap
     </div>
   `;
 
-  const existing = Array.from(shelvesContainer.children);
-  const nextSibling = existing.find((el) => Number(el.dataset.order) > sec.order);
-  if (nextSibling) {
-    shelvesContainer.insertBefore(wrapper, nextSibling);
+  const existingWrapper = shelvesContainer.querySelector(`.shelf-section[data-order="${sec.order}"]`);
+  if (existingWrapper) {
+    existingWrapper.replaceWith(wrapper);
   } else {
-    shelvesContainer.appendChild(wrapper);
+    const existing = Array.from(shelvesContainer.children);
+    const nextSibling = existing.find((el) => Number(el.dataset.order) > sec.order);
+    if (nextSibling) {
+      shelvesContainer.insertBefore(wrapper, nextSibling);
+    } else {
+      shelvesContainer.appendChild(wrapper);
+    }
   }
 
   wrapper.querySelectorAll('[data-open-order]').forEach((btn) => {
@@ -2422,7 +2850,10 @@ async function openDetailsPage(preview) {
 }
 
 function findCwResumeForContent(contentId) {
-  return cwCardsCache.find((c) => simklUses('progress') ? simklProgressMatches(c, contentId) : c.content_id === contentId) || null;
+  const src = activeProgressSource();
+  if (src === 'simkl') return cwCardsCache.find((c) => simklProgressMatches(c, contentId)) || null;
+  if (src === 'mdblist') return cwCardsCache.find((c) => mdblistMatchesCard(c, contentId)) || null;
+  return cwCardsCache.find((c) => c.content_id === contentId) || null;
 }
 
 function updateDetailScrollDim() {
@@ -2861,7 +3292,27 @@ function renderDetailsScreen(preview, meta) {
 
     document.getElementById('btn-season-mark-watched').onclick = async () => {
       const eps = videos.filter((v) => (v.season ?? 1) === currentSeason);
-      if (simklUses('progress')) {
+      const progressSource = activeProgressSource();
+      if (progressSource === 'mdblist') {
+        const unwatched = eps.filter((ep) => !watchedSet.has(epWatchKey(preview.id, currentSeason, ep.episode ?? ep.number ?? 1)));
+        if (!unwatched.length) return;
+        try {
+          for (const ep of unwatched) {
+            await invoke('mdblist_watched_mutate', {
+              remove: false,
+              mediaType: 'series',
+              id: preview.id,
+              season: currentSeason,
+              episode: ep.episode ?? ep.number ?? 1,
+            });
+          }
+          await refreshMdblistProgress(true);
+          await refreshWatchedKeys();
+          renderSeasonEpisodes(currentSeason);
+        } catch (e) { showToast(String(e)); }
+        return;
+      }
+      if (progressSource === 'simkl') {
         const episodes = eps.map(ep => ({number:ep.episode ?? ep.number ?? 1}))
           .filter(ep => !watchedSet.has(epWatchKey(preview.id,currentSeason,ep.number)));
         if (!episodes.length) return;
@@ -4254,7 +4705,7 @@ async function syncActivePlayerWatchProgress(force = false) {
   const ctx = activePlayerCtx;
   const st = ctx?.latestState;
   if (!ctx?.contentId || !st || st.duration_secs <= 10) return;
-  if (simklUses('progress')) return;
+  if (activeProgressSource() !== 'default') return;
   const now = Date.now();
   if (!force && now - (ctx.lastProgressSyncMs || 0) < 25000) return;
   ctx.lastProgressSyncMs = now;
@@ -4816,10 +5267,22 @@ function playbackIsAnime(ctx) {
 async function startInAppPlayback(req) {
   try { req = await resolveConnectedMedia(req); }
   catch (e) { showToast(String(e)); return; }
-  if (activePlayerCtx) await simklSendScrobble(activePlayerCtx,activePlayerCtx.latestState,true);
-  const simklResume = simklUses('progress') && !req.startSecs && simklProgressCards().find(card =>
-    simklProgressMatches(card, req.contentId) && (card.episode ?? null) === (req.episode ?? null) &&
-      (card.season ?? null) === (req.season ?? null));
+  if (activePlayerCtx) {
+    await simklSendScrobble(activePlayerCtx, activePlayerCtx.latestState, true);
+    await mdblistSendScrobble(activePlayerCtx, activePlayerCtx.latestState, true);
+  }
+  const progressSrc = activeProgressSource();
+  const simklResume = !req.startSecs && (
+    progressSrc === 'simkl'
+      ? simklProgressCards().find(card =>
+          simklProgressMatches(card, req.contentId) && (card.episode ?? null) === (req.episode ?? null) &&
+            (card.season ?? null) === (req.season ?? null))
+      : progressSrc === 'mdblist'
+        ? (mdblistProgressCache.cards || []).find(card =>
+            mdblistMatchesCard(card, req.contentId) && (card.episode ?? null) === (req.episode ?? null) &&
+              (card.season ?? null) === (req.season ?? null))
+        : null
+  );
   await invoke('player_stop').catch(() => {});
   playerActive = true;
   playerCurrentPaused = false;
@@ -4917,6 +5380,7 @@ async function startInAppPlayback(req) {
       invoke('player_seek',{secs:target}).catch(e => showToast(String(e)));
     } else if (st.active || st.ended) {
       simklSendScrobble(activePlayerCtx,st);
+      mdblistSendScrobble(activePlayerCtx, st);
     }
     observeSubtitleSync(activePlayerCtx, st);
     const nowMs = Date.now();
@@ -5070,7 +5534,10 @@ function updateFallbackPlayerUi(st) {
 async function closeEmbeddedPlayer() {
   fallbackSeekPreview.hide();
   if (!playerActive) return;
-  if (activePlayerCtx) await simklSendScrobble(activePlayerCtx,activePlayerCtx.latestState,true);
+  if (activePlayerCtx) {
+    await simklSendScrobble(activePlayerCtx,activePlayerCtx.latestState,true);
+    await mdblistSendScrobble(activePlayerCtx, activePlayerCtx.latestState, true);
+  }
   await syncActivePlayerWatchProgress(true);
   playerActive = false;
   activePlayerCtx = null;
@@ -5152,6 +5619,7 @@ document.getElementById('btn-player-fullscreen').addEventListener('click', () =>
 
 // --- SEARCH & DISCOVER (100% Addons + Recent Searches + Dropdowns) ---
 let searchSeq = 0;
+let recentSearchOpen = false;
 let searchDebounceTimer = null;
 let searchListeners;
 let activeSearchQuery = '';
@@ -5193,46 +5661,76 @@ function saveRecentSearch(q) {
 
 function renderRecentSearches() {
   const wrap = document.getElementById('recent-searches-wrap');
+  if (!wrap) return;
   const hasQuery = searchInputEl.value.trim().length > 0;
   const list = loadRecentSearches();
-  if (hasQuery || !list.length) {
+  // Só aparece com a barra de pesquisa ativa e sem texto escrito.
+  if (!recentSearchOpen || hasQuery || !list.length) {
     wrap.classList.add('hidden');
     wrap.innerHTML = '';
     return;
   }
   wrap.classList.remove('hidden');
   wrap.innerHTML = `
-    <span class="muted" style="font-size:12px;">Recentes:</span>
+    <div class="recent-searches-title">Buscas recentes</div>
     ${list.map((q) => `
-      <span class="recent-search-chip" data-recent-q="${esc(q)}">
-        <span>${esc(q)}</span>
-        <button data-del-recent="${esc(q)}" title="Remover">&times;</button>
-      </span>
+      <div class="recent-search-row" data-recent-q="${esc(q)}">
+        <span class="recent-search-text">${esc(q)}</span>
+        <button type="button" data-del-recent="${esc(q)}" title="Remover" aria-label="Remover busca">&times;</button>
+      </div>
     `).join('')}
   `;
-  wrap.querySelectorAll('[data-recent-q]').forEach((chip) => {
-    chip.addEventListener('click', (e) => {
-      if (e.target.dataset.delRecent) {
-        const next = loadRecentSearches().filter((x) => x !== e.target.dataset.delRecent);
+  wrap.querySelectorAll('[data-recent-q]').forEach((row) => {
+    row.addEventListener('click', (e) => {
+      const del = e.target.closest('[data-del-recent]');
+      if (del) {
+        const next = loadRecentSearches().filter((x) => x !== del.dataset.delRecent);
         localStorage.setItem(recentSearchStorageKey(), JSON.stringify(next));
         renderRecentSearches();
         return;
       }
-      searchInputEl.value = chip.dataset.recentQ;
+      recentSearchOpen = false;
+      searchInputEl.value = row.dataset.recentQ;
       runSearch();
     });
   });
 }
 
+searchInputEl.addEventListener('focus', () => {
+  recentSearchOpen = true;
+  renderRecentSearches();
+});
+searchInputEl.addEventListener('blur', () => {
+  // Pequeno atraso para o clique numa busca recente contar antes de fechar.
+  setTimeout(() => {
+    recentSearchOpen = false;
+    renderRecentSearches();
+  }, 120);
+});
+searchInputEl.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Escape') return;
+  recentSearchOpen = false;
+  renderRecentSearches();
+});
+document.getElementById('recent-searches-wrap')?.addEventListener('mousedown', (ev) => {
+  // Mantém o foco na barra para o painel não fechar ao clicar numa linha.
+  ev.preventDefault();
+});
+
 function syncSearchModeUi() {
   const hasQuery = searchInputEl.value.trim().length > 0;
   searchClearBtn.classList.toggle('hidden', searchInputEl.value.length === 0);
   document.getElementById('search-results').classList.toggle('hidden', !hasQuery);
+  document.getElementById('discover-section')?.classList.toggle('hidden', hasQuery);
   renderRecentSearches();
   if (!hasQuery) {
     document.getElementById('search-status').textContent = '';
   }
 }
+
+document.getElementById('btn-search-fullscreen')?.addEventListener('click', () => {
+  invoke('window_toggle_fullscreen').catch(() => {});
+});
 
 document.getElementById('search-form').addEventListener('submit', (event) => {
   event.preventDefault();
@@ -5321,6 +5819,17 @@ function catalogSupportsDiscover(cat) {
   });
 }
 
+function discoverTypeLabel(t) {
+  switch (String(t || '').toLowerCase()) {
+    case 'movie': return 'Filmes';
+    case 'series': return 'Séries';
+    case 'anime': return 'Animes';
+    case 'channel': return 'Canais';
+    case 'tv': return 'TV';
+    default: return t ? t.charAt(0).toUpperCase() + t.slice(1) : '';
+  }
+}
+
 function initDiscoverFromAddons(addons) {
   discoverCatalogs = [];
   for (const addon of (addons || [])) {
@@ -5345,11 +5854,11 @@ function initDiscoverFromAddons(addons) {
   if (!discoverSelectedType || !types.includes(discoverSelectedType)) {
     discoverSelectedType = types[0] || null;
   }
-  if (activeTabName() === 'discover') syncDiscoverSelection();
+  if (activeTabName() === 'search') syncDiscoverSelection();
 }
 
 function syncDiscoverSelection() {
-  const typePillsEl = document.getElementById('discover-type-pills');
+  const typeSelectEl = document.getElementById('discover-type-select');
   const catSelectEl = document.getElementById('discover-catalog-select');
   const genreSelectEl = document.getElementById('discover-genre-select');
   const ctxLabelEl = document.getElementById('discover-context-label');
@@ -5362,9 +5871,18 @@ function syncDiscoverSelection() {
     ++discoverRequest;
     discoverLoading = false;
     discoverHasMore = false;
-    typePillsEl.innerHTML = '';
-    catSelectEl.innerHTML = '';
-    genreSelectEl.classList.add('hidden');
+    if (typeSelectEl) {
+      typeSelectEl.innerHTML = '<option value="">Tipo</option>';
+      typeSelectEl.disabled = true;
+    }
+    if (catSelectEl) {
+      catSelectEl.innerHTML = '<option value="">Catálogo</option>';
+      catSelectEl.disabled = true;
+    }
+    if (genreSelectEl) {
+      genreSelectEl.innerHTML = '<option value="">Todos os gêneros</option>';
+      genreSelectEl.disabled = true;
+    }
     ctxLabelEl.textContent = '';
     gridEl.innerHTML = '';
     loadMoreBtn.classList.add('hidden');
@@ -5372,19 +5890,18 @@ function syncDiscoverSelection() {
     return;
   }
 
-  typePillsEl.innerHTML = types.map((t) => {
-    const label = t === 'movie' ? 'Filmes' : (t === 'series' ? 'Séries' : t);
-    return `<button class="season-pill ${t === discoverSelectedType ? 'active' : ''}" data-disc-type="${esc(t)}">${esc(label)}</button>`;
-  }).join('');
-
-  typePillsEl.querySelectorAll('[data-disc-type]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      discoverSelectedType = btn.dataset.discType;
+  if (typeSelectEl) {
+    typeSelectEl.disabled = false;
+    typeSelectEl.innerHTML = types.map((t) =>
+      `<option value="${esc(t)}" ${t === discoverSelectedType ? 'selected' : ''}>${esc(discoverTypeLabel(t))}</option>`,
+    ).join('');
+    typeSelectEl.onchange = () => {
+      discoverSelectedType = typeSelectEl.value;
       discoverSelectedKey = null;
       discoverSelectedGenre = null;
       syncDiscoverSelection();
-    });
-  });
+    };
+  }
 
   const filteredCats = discoverCatalogs.filter((c) => c.type === discoverSelectedType);
   if (!discoverSelectedKey || !filteredCats.some((c) => c.key === discoverSelectedKey)) {
@@ -5392,40 +5909,46 @@ function syncDiscoverSelection() {
   }
   const activeCat = filteredCats.find((c) => c.key === discoverSelectedKey) || null;
 
-  catSelectEl.innerHTML = filteredCats.map((c) =>
-    `<option value="${esc(c.key)}" ${c.key === discoverSelectedKey ? 'selected' : ''}>${esc(c.catalogName)} (${esc(c.addonName)})</option>`,
-  ).join('');
-  catSelectEl.onchange = () => {
-    discoverSelectedKey = catSelectEl.value;
-    discoverSelectedGenre = null;
-    syncDiscoverSelection();
-  };
-
-  if (activeCat?.genreOptions?.length) {
-    if (activeCat.genreRequired && (!discoverSelectedGenre || !activeCat.genreOptions.includes(discoverSelectedGenre))) {
-      discoverSelectedGenre = activeCat.genreOptions[0];
-    } else if (discoverSelectedGenre && !activeCat.genreOptions.includes(discoverSelectedGenre)) {
+  if (catSelectEl) {
+    catSelectEl.disabled = filteredCats.length === 0;
+    catSelectEl.innerHTML = filteredCats.map((c) =>
+      `<option value="${esc(c.key)}" ${c.key === discoverSelectedKey ? 'selected' : ''}>${esc(c.catalogName)}</option>`,
+    ).join('');
+    catSelectEl.onchange = () => {
+      discoverSelectedKey = catSelectEl.value;
       discoverSelectedGenre = null;
-    }
-    const opts = activeCat.genreRequired ? activeCat.genreOptions : ['__all__', ...activeCat.genreOptions];
-    genreSelectEl.innerHTML = opts.map((g) => {
-      const val = g === '__all__' ? '' : g;
-      const label = g === '__all__' ? 'Gênero: Todos' : g;
-      const isSel = (val || null) === discoverSelectedGenre;
-      return `<option value="${esc(val)}" ${isSel ? 'selected' : ''}>${esc(label)}</option>`;
-    }).join('');
-    genreSelectEl.classList.remove('hidden');
-    genreSelectEl.onchange = () => {
-      discoverSelectedGenre = genreSelectEl.value || null;
       syncDiscoverSelection();
     };
-  } else {
-    discoverSelectedGenre = null;
-    genreSelectEl.classList.add('hidden');
+  }
+
+  if (genreSelectEl) {
+    if (activeCat?.genreOptions?.length) {
+      if (activeCat.genreRequired && (!discoverSelectedGenre || !activeCat.genreOptions.includes(discoverSelectedGenre))) {
+        discoverSelectedGenre = activeCat.genreOptions[0];
+      } else if (discoverSelectedGenre && !activeCat.genreOptions.includes(discoverSelectedGenre)) {
+        discoverSelectedGenre = null;
+      }
+      const opts = activeCat.genreRequired ? activeCat.genreOptions : ['__all__', ...activeCat.genreOptions];
+      genreSelectEl.innerHTML = opts.map((g) => {
+        const val = g === '__all__' ? '' : g;
+        const label = g === '__all__' ? 'Todos os gêneros' : g;
+        const isSel = (val || null) === discoverSelectedGenre;
+        return `<option value="${esc(val)}" ${isSel ? 'selected' : ''}>${esc(label)}</option>`;
+      }).join('');
+      genreSelectEl.disabled = opts.length <= 1 && !activeCat.genreRequired;
+      genreSelectEl.onchange = () => {
+        discoverSelectedGenre = genreSelectEl.value || null;
+        syncDiscoverSelection();
+      };
+    } else {
+      discoverSelectedGenre = null;
+      genreSelectEl.innerHTML = '<option value="">Todos os gêneros</option>';
+      genreSelectEl.disabled = true;
+    }
   }
 
   ctxLabelEl.textContent = activeCat
-    ? `${activeCat.catalogName} • ${activeCat.addonName}${discoverSelectedGenre ? ` • ${discoverSelectedGenre}` : ''}`
+    ? `${activeCat.addonName} • ${discoverTypeLabel(activeCat.type)}${discoverSelectedGenre ? ` • ${discoverSelectedGenre}` : ''}`
     : '';
 
   loadDiscoverPage(true);
@@ -5502,18 +6025,23 @@ document.getElementById('btn-discover-load-more').addEventListener('click', () =
 let librarySubTab = 'saved';
 
 function setLibrarySubTab(nextTab) {
-  librarySubTab = nextTab === 'following' ? 'following' : 'saved';
+  librarySubTab = nextTab === 'following' || nextTab === 'calendar' ? nextTab : 'saved';
   document.querySelectorAll('[data-library-tab]').forEach((btn) => {
     const active = btn.dataset.libraryTab === librarySubTab;
     btn.classList.toggle('active', active);
     btn.setAttribute('aria-selected', active ? 'true' : 'false');
   });
+  document.getElementById('btn-library-calendar')?.classList.toggle('is-active', librarySubTab === 'calendar');
   const savedPanel = document.getElementById('library-panel-saved');
   const followingPanel = document.getElementById('library-panel-following');
+  const calendarPanel = document.getElementById('library-panel-calendar');
   if (savedPanel) savedPanel.hidden = librarySubTab !== 'saved';
   if (followingPanel) followingPanel.hidden = librarySubTab !== 'following';
+  if (calendarPanel) calendarPanel.hidden = librarySubTab !== 'calendar';
   if (librarySubTab === 'following') {
     renderFollowingSection();
+  } else if (librarySubTab === 'calendar') {
+    loadLibraryCalendar();
   } else {
     renderFilteredLibrary();
   }
@@ -5523,13 +6051,561 @@ document.querySelectorAll('[data-library-tab]').forEach((btn) => {
   btn.addEventListener('click', () => setLibrarySubTab(btn.dataset.libraryTab));
 });
 
+// --- LIBRARY CALENDAR (Desktop-first release planner) ---
+const LIBRARY_CALENDAR_CACHE_KEY = 'nuvio-library-calendar-v4';
+const LIBRARY_CALENDAR_TTL_MS = 6 * 60 * 60 * 1000;
+const LIBRARY_CALENDAR_MAX_SERIES = 120;
+const LIBRARY_CALENDAR_WINDOW_DAYS = 210;
+const LIBRARY_CALENDAR_MONTHS = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
+const LIBRARY_CALENDAR_MONTHS_SHORT = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+const LIBRARY_CALENDAR_WEEKDAYS = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
+let libraryCalendarLoading = false;
+const libraryCalendarState = { rows: [], month: null, selected: null, view: 'month', query: '' };
+const CALENDAR_CHEVRON_LEFT = '<svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M15.41 16.59 14 18l-6-6 6-6 1.41 1.41L10.83 12z"/></svg>';
+const CALENDAR_CHEVRON_RIGHT = '<svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M8.59 16.59 10 18l6-6-6-6-1.41 1.41L13.17 12z"/></svg>';
+const CALENDAR_REFRESH_SVG = '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4z"/></svg>';
+
+function readLibraryCalendarCache() {
+  try {
+    return JSON.parse(localStorage.getItem(LIBRARY_CALENDAR_CACHE_KEY) || 'null');
+  } catch {
+    return null;
+  }
+}
+
+function librarySeriesForCalendar() {
+  const seen = new Set();
+  const out = [];
+  for (const it of libraryRawItems) {
+    const type = String(it.content_type || it.type || '').toLowerCase();
+    if (type !== 'series' && type !== 'tv' && type !== 'show') continue;
+    const id = String(it.content_id || it.id || '').trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push({ id, name: it.name || it.title || id, poster: it.poster || '' });
+  }
+  return out;
+}
+
+function calendarParseDay(iso) {
+  const date = new Date(`${String(iso || '').slice(0, 10)}T00:00:00`);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function calendarDayKey(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function calendarStartOfMonth(date) {
+  return new Date(date.getFullYear(), date.getMonth(), 1);
+}
+
+function calendarMonthTitle(date) {
+  return `${LIBRARY_CALENDAR_MONTHS[date.getMonth()]} ${date.getFullYear()}`;
+}
+
+function calendarLongDate(date) {
+  const weekday = date.toLocaleDateString('pt-BR', { weekday: 'long' });
+  return `${weekday.charAt(0).toUpperCase()}${weekday.slice(1)}, ${date.getDate()} de ${LIBRARY_CALENDAR_MONTHS[date.getMonth()].toLowerCase()}`;
+}
+
+function calendarRelativeLabel(date) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const diff = Math.round((date - today) / 86400000);
+  if (diff === 0) return 'Hoje';
+  if (diff === 1) return 'Amanhã';
+  return `Em ${diff} dias`;
+}
+
+function calendarReleaseLabel(row) {
+  const code = row.season > 0 ? `T${row.season}E${row.episode}` : `Ep. ${row.episode}`;
+  return row.episodeTitle ? `${code} · ${row.episodeTitle}` : code;
+}
+
+async function resolveCalendarTmdbIds(series, stored, onProgress) {
+  const ids = {};
+  const pending = [];
+  for (const item of series) {
+    // Ids já em formato TMDB evitam uma chamada de metadados ao addon.
+    const inline = /^tmdb:(\d+)$/.exec(item.id);
+    if (inline) {
+      ids[item.id] = Number(inline[1]);
+      continue;
+    }
+    const cached = Number(stored?.[item.id]);
+    if (cached > 0) ids[item.id] = cached;
+    else pending.push(item);
+  }
+  let done = 0;
+  const queue = [...pending];
+  const worker = async () => {
+    while (queue.length) {
+      const item = queue.shift();
+      const meta = await fetchMetaDetailsCached('series', item.id).catch(() => null);
+      const tmdb = Number(meta?.tmdb_id ?? meta?.moviedb_id ?? 0);
+      if (tmdb > 0) ids[item.id] = tmdb;
+      done += 1;
+      onProgress(done, pending.length);
+    }
+  };
+  const workers = Math.min(6, Math.max(queue.length, 1));
+  await Promise.all(Array.from({ length: workers }, worker));
+  return ids;
+}
+
+function buildLibraryCalendarRows(items, tmdbIds) {
+  const byTmdb = new Map();
+  for (const item of librarySeriesForCalendar()) {
+    const id = Number(tmdbIds?.[item.id]);
+    if (id > 0 && !byTmdb.has(id)) byTmdb.set(id, item);
+  }
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const end = new Date(today.getTime() + LIBRARY_CALENDAR_WINDOW_DAYS * 86400000);
+  const seen = new Set();
+  const dated = [];
+  const undated = [];
+  for (const it of Array.isArray(items) ? items : []) {
+    const series = byTmdb.get(Number(it.tmdb_id));
+    const date = calendarParseDay(it.released);
+    // Episódios que o TMDB já lista mas ainda sem data vão para o fim da agenda.
+    if (!date && !it.undated) continue;
+    const row = {
+      date,
+      day: date ? calendarDayKey(date) : '',
+      poster: it.poster || series?.poster || '',
+      backdrop: it.backdrop || '',
+      name: series?.name || it.name || '',
+      id: series?.id || '',
+      tmdbId: Number(it.tmdb_id) || 0,
+      season: Number(it.season) || 0,
+      episode: Number(it.episode) || 0,
+      episodeTitle: it.title || '',
+      overview: it.overview || '',
+      undated: !date,
+    };
+    const key = `${row.tmdbId}:${row.day}:${row.season}:${row.episode}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (!date) undated.push(row);
+    else if (date >= today && date <= end) dated.push(row);
+  }
+  dated.sort((a, b) => a.date - b.date || a.name.localeCompare(b.name));
+  undated.sort((a, b) => a.name.localeCompare(b.name) || a.episode - b.episode);
+  return [...dated, ...undated];
+}
+
+function renderLibraryCalendar(items, tmdbIds) {
+  const wrap = document.getElementById('library-calendar');
+  if (!wrap) return;
+  libraryCalendarState.rows = buildLibraryCalendarRows(items, tmdbIds);
+  if (!libraryCalendarState.rows.length) {
+    wrap.innerHTML = '';
+    return;
+  }
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todayKey = calendarDayKey(today);
+  const firstDated = libraryCalendarState.rows.find((row) => !row.undated);
+  libraryCalendarState.selected = libraryCalendarState.rows.some((row) => row.day === todayKey)
+    ? todayKey
+    : (firstDated?.day || todayKey);
+  libraryCalendarState.month = calendarStartOfMonth(
+    calendarParseDay(libraryCalendarState.selected) || today,
+  );
+  drawLibraryCalendar();
+}
+
+function calendarEpisodeCode(row) {
+  return row.season > 0 ? `T${row.season}E${row.episode}` : `Ep. ${row.episode}`;
+}
+
+function calendarWeekStart(date) {
+  const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const offset = (d.getDay() + 6) % 7;
+  d.setDate(d.getDate() - offset);
+  return d;
+}
+
+function calendarWeekRangeLabel(weekStart) {
+  const weekEnd = new Date(weekStart.getFullYear(), weekStart.getMonth(), weekStart.getDate() + 6);
+  const startLabel = `${weekStart.getDate()} ${LIBRARY_CALENDAR_MONTHS_SHORT[weekStart.getMonth()]}`;
+  const endLabel = `${weekEnd.getDate()} ${LIBRARY_CALENDAR_MONTHS_SHORT[weekEnd.getMonth()]} ${weekEnd.getFullYear()}`;
+  return `${startLabel} – ${endLabel}`;
+}
+
+function drawLibraryCalendar() {
+  const wrap = document.getElementById('library-calendar');
+  const allRows = libraryCalendarState.rows;
+  if (!wrap || !allRows.length) return;
+
+  const q = libraryCalendarState.query.trim().toLowerCase();
+  const rows = q
+    ? allRows.filter((r) => r.name.toLowerCase().includes(q) || r.episodeTitle.toLowerCase().includes(q))
+    : allRows;
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todayKey = calendarDayKey(today);
+  const tomorrowKey = calendarDayKey(new Date(today.getTime() + 86400000));
+  const weekStartOfToday = calendarWeekStart(today);
+  const weekEndKey = calendarDayKey(new Date(weekStartOfToday.getTime() + 6 * 86400000));
+
+  const month = libraryCalendarState.month || calendarStartOfMonth(today);
+  const monthKey = `${month.getFullYear()}-${String(month.getMonth() + 1).padStart(2, '0')}`;
+  const selected = libraryCalendarState.selected || todayKey;
+  const view = libraryCalendarState.view || 'month';
+
+  const byDayAll = new Map();
+  for (const row of rows) {
+    if (!row.day) continue;
+    if (!byDayAll.has(row.day)) byDayAll.set(row.day, []);
+    byDayAll.get(row.day).push(row);
+  }
+
+  let monthCount = 0;
+  let todayCount = 0;
+  let weekCount = 0;
+  for (const row of rows) {
+    if (!row.day) continue;
+    if (row.day.startsWith(monthKey)) monthCount += 1;
+    if (row.day === todayKey) todayCount += 1;
+    if (row.day >= todayKey && row.day <= weekEndKey) weekCount += 1;
+  }
+
+  const datedRows = rows.filter((row) => row.date);
+  const undatedRows = rows.filter((row) => row.undated);
+  const firstMonth = calendarStartOfMonth(datedRows.length ? datedRows[0].date : today);
+  const lastMonth = calendarStartOfMonth(datedRows.length ? datedRows[datedRows.length - 1].date : today);
+  const canPrev = view === 'week' ? true : month.getTime() > firstMonth.getTime();
+  const canNext = view === 'week' ? true : month.getTime() < lastMonth.getTime();
+
+  const calendarItemHtml = (row, compact = false) => `
+    <button class="calendar-item${compact ? ' is-compact' : ''}" type="button" data-calendar-id="${esc(row.id)}" data-calendar-name="${esc(row.name)}" data-calendar-poster="${esc(row.poster)}">
+      <span class="calendar-item-art">
+        ${row.backdrop || row.poster ? `<img src="${esc(row.backdrop || row.poster)}" alt="" loading="lazy" decoding="async" />` : ''}
+      </span>
+      <span class="calendar-item-body">
+        <span class="calendar-item-name">${esc(row.name)}</span>
+        <span class="calendar-item-ep">${esc(calendarReleaseLabel(row))}</span>
+        ${!compact && row.overview ? `<span class="calendar-item-overview">${esc(row.overview)}</span>` : ''}
+      </span>
+      <span class="calendar-item-chevron">${CALENDAR_CHEVRON_RIGHT}</span>
+    </button>`;
+
+  const selectedDateObj = calendarParseDay(selected) || today;
+  const activeWeekStart = calendarWeekStart(selectedDateObj);
+
+  const headingTitle = view === 'week'
+    ? calendarWeekRangeLabel(activeWeekStart)
+    : calendarMonthTitle(month);
+
+  const statsHtml = [
+    `<span class="cal-stat-pill">${monthCount} ${monthCount === 1 ? 'episódio' : 'episódios'} em ${LIBRARY_CALENDAR_MONTHS[month.getMonth()].toLowerCase()}</span>`,
+    todayCount ? `<span class="cal-stat-pill is-highlight">${todayCount} hoje</span>` : '',
+    weekCount ? `<span class="cal-stat-pill">${weekCount} esta semana</span>` : '',
+  ].filter(Boolean).join('');
+
+  let mainBodyHtml = '';
+
+  if (view === 'month') {
+    const firstOfMonth = new Date(month.getFullYear(), month.getMonth(), 1);
+    const daysInMonth = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
+    const lead = (firstOfMonth.getDay() + 6) % 7;
+    const cells = [];
+    for (let i = 0; i < lead; i += 1) cells.push('<span class="calendar-cell is-empty"></span>');
+    for (let day = 1; day <= daysInMonth; day += 1) {
+      const key = `${monthKey}-${String(day).padStart(2, '0')}`;
+      const list = byDayAll.get(key) || [];
+      const cls = ['calendar-cell'];
+      if (list.length) cls.push('has-release');
+      if (key === todayKey) cls.push('is-today');
+      if (key === selected) cls.push('is-selected');
+      const chipsHtml = list.slice(0, 3).map((row) => `
+        <span class="cal-day-chip" title="${esc(`${row.name} — ${calendarReleaseLabel(row)}`)}">
+          ${row.poster ? `<img src="${esc(row.poster)}" alt="" loading="lazy" decoding="async" />` : '<span class="cal-day-chip-dot"></span>'}
+          <span class="cal-day-chip-name">${esc(row.name)}</span>
+          <span class="cal-day-chip-ep">${esc(calendarEpisodeCode(row))}</span>
+        </span>
+      `).join('');
+      const overflowHtml = list.length > 3
+        ? `<span class="cal-day-more">+${list.length - 3} mais</span>`
+        : '';
+      cells.push(`
+        <button type="button" class="${cls.join(' ')}" data-calendar-day="${key}">
+          <span class="calendar-cell-head">
+            <span class="calendar-cell-num">${day}</span>
+            ${key === todayKey ? '<span class="cal-cell-today-tag">Hoje</span>' : ''}
+          </span>
+          <span class="cal-cell-events">${chipsHtml}${overflowHtml}</span>
+        </button>`);
+    }
+    while (cells.length % 7 !== 0) cells.push('<span class="calendar-cell is-empty"></span>');
+
+    const selectedDayRows = byDayAll.get(selected) || [];
+    const upcomingAfterSelected = rows.filter((r) => r.day && r.day > selected).slice(0, 24);
+    const upcomingGroups = [];
+    for (const row of upcomingAfterSelected) {
+      const last = upcomingGroups[upcomingGroups.length - 1];
+      if (last && last.day === row.day) last.rows.push(row);
+      else upcomingGroups.push({ day: row.day, rows: [row] });
+    }
+
+    mainBodyHtml = `
+      <div class="cal-month-split">
+        <section class="calendar-main">
+          <div class="calendar-weekdays">
+            ${LIBRARY_CALENDAR_WEEKDAYS.map((label) => `<span class="calendar-weekday">${label}</span>`).join('')}
+          </div>
+          <div class="calendar-grid">${cells.join('')}</div>
+        </section>
+        <aside class="calendar-agenda">
+          <div class="calendar-agenda-head">
+            <div>
+              <h3 class="calendar-agenda-title">${esc(calendarLongDate(selectedDateObj))}</h3>
+              <span class="calendar-agenda-date">${selectedDayRows.length ? `${selectedDayRows.length} ${selectedDayRows.length === 1 ? 'estreia neste dia' : 'estreias neste dia'}` : 'Nenhum episódio neste dia'}</span>
+            </div>
+            ${selected === todayKey || selected === tomorrowKey ? `<span class="calendar-day-now">${esc(calendarRelativeLabel(selectedDateObj))}</span>` : ''}
+          </div>
+          <div class="calendar-list">
+            ${selectedDayRows.length
+              ? `<div class="calendar-day-items">${selectedDayRows.map((r) => calendarItemHtml(r)).join('')}</div>`
+              : '<div class="calendar-empty">Selecione um dia destacado ou veja os próximos lançamentos abaixo.</div>'}
+            ${upcomingGroups.length ? `
+              <div class="cal-upcoming-divider">Próximos dias</div>
+              ${upcomingGroups.map((group) => {
+                const date = calendarParseDay(group.day);
+                const near = group.day === todayKey || group.day === tomorrowKey;
+                return `
+                <section class="calendar-day-group">
+                  <header class="calendar-day-head">
+                    <h4 class="calendar-day-title">${esc(calendarLongDate(date))}</h4>
+                    ${near ? `<span class="calendar-day-now">${esc(calendarRelativeLabel(date))}</span>` : ''}
+                  </header>
+                  <div class="calendar-day-items">${group.rows.map((r) => calendarItemHtml(r, true)).join('')}</div>
+                </section>`;
+              }).join('')}
+            ` : ''}
+            ${undatedRows.length ? `
+              <details class="cal-undated-drawer">
+                <summary>Data a anunciar (${undatedRows.length})</summary>
+                <div class="calendar-day-items">${undatedRows.map((r) => calendarItemHtml(r, true)).join('')}</div>
+              </details>` : ''}
+          </div>
+        </aside>
+      </div>`;
+  } else if (view === 'week') {
+    const cols = [];
+    for (let i = 0; i < 7; i += 1) {
+      const d = new Date(activeWeekStart.getFullYear(), activeWeekStart.getMonth(), activeWeekStart.getDate() + i);
+      const key = calendarDayKey(d);
+      const dayRows = byDayAll.get(key) || [];
+      const isToday = key === todayKey;
+      const isSelected = key === selected;
+      cols.push(`
+        <div class="cal-week-col${isToday ? ' is-today' : ''}${isSelected ? ' is-selected' : ''}" data-calendar-day="${key}">
+          <div class="cal-week-col-head">
+            <span class="cal-week-col-dow">${LIBRARY_CALENDAR_WEEKDAYS[i]}</span>
+            <span class="cal-week-col-date">${d.getDate()} ${LIBRARY_CALENDAR_MONTHS_SHORT[d.getMonth()]}</span>
+            ${isToday ? '<span class="calendar-day-now">Hoje</span>' : ''}
+          </div>
+          <div class="cal-week-col-list">
+            ${dayRows.length ? dayRows.map((row) => `
+              <button type="button" class="cal-week-card calendar-item" data-calendar-id="${esc(row.id)}" data-calendar-name="${esc(row.name)}" data-calendar-poster="${esc(row.poster)}">
+                ${row.backdrop || row.poster ? `<div class="cal-week-card-art"><img src="${esc(row.backdrop || row.poster)}" alt="" loading="lazy" decoding="async" /></div>` : ''}
+                <div class="cal-week-card-body">
+                  <span class="cal-week-card-code">${esc(calendarEpisodeCode(row))}</span>
+                  <strong class="cal-week-card-name">${esc(row.name)}</strong>
+                  ${row.episodeTitle ? `<span class="cal-week-card-ep">${esc(row.episodeTitle)}</span>` : ''}
+                </div>
+              </button>
+            `).join('') : '<div class="cal-week-empty">—</div>'}
+          </div>
+        </div>`);
+    }
+    mainBodyHtml = `<div class="cal-week-board">${cols.join('')}</div>`;
+  } else {
+    const groups = [];
+    for (const row of datedRows) {
+      const last = groups[groups.length - 1];
+      if (last && last.day === row.day) last.rows.push(row);
+      else groups.push({ day: row.day, rows: [row] });
+    }
+    mainBodyHtml = `
+      <div class="cal-timeline-list">
+        ${groups.map((group) => {
+          const date = calendarParseDay(group.day);
+          const near = group.day === todayKey || group.day === tomorrowKey;
+          return `
+          <section class="cal-timeline-group">
+            <header class="calendar-day-head">
+              <h4 class="calendar-day-title">${esc(calendarLongDate(date))}</h4>
+              ${near ? `<span class="calendar-day-now">${esc(calendarRelativeLabel(date))}</span>` : ''}
+            </header>
+            <div class="cal-timeline-grid">${group.rows.map((r) => calendarItemHtml(r)).join('')}</div>
+          </section>`;
+        }).join('')}
+        ${undatedRows.length ? `
+          <section class="cal-timeline-group">
+            <header class="calendar-day-head"><h4 class="calendar-day-title">Data a anunciar</h4></header>
+            <div class="cal-timeline-grid">${undatedRows.map((r) => calendarItemHtml(r, true)).join('')}</div>
+          </section>` : ''}
+        ${!groups.length && !undatedRows.length ? '<div class="calendar-empty">Nenhum episódio encontrado para o filtro atual.</div>' : ''}
+      </div>`;
+  }
+
+  wrap.innerHTML = `
+    <div class="library-calendar-shell is-desktop-cal">
+      <div class="cal-desktop-toolbar">
+        <div class="cal-toolbar-left">
+          <h3 class="calendar-month">${esc(headingTitle)}</h3>
+          <div class="cal-stats-row">${statsHtml}</div>
+        </div>
+        <div class="cal-toolbar-right">
+          <input type="search" class="cal-search-input" id="cal-series-filter" placeholder="Filtrar série ou episódio…" value="${esc(libraryCalendarState.query)}" />
+          <div class="cal-view-switch" role="tablist" aria-label="Modo de visualização do calendário">
+            <button type="button" class="cal-view-btn${view === 'month' ? ' active' : ''}" data-calendar-view="month">Mês</button>
+            <button type="button" class="cal-view-btn${view === 'week' ? ' active' : ''}" data-calendar-view="week">Semana</button>
+            <button type="button" class="cal-view-btn${view === 'list' ? ' active' : ''}" data-calendar-view="list">Lista</button>
+          </div>
+          <div class="calendar-nav">
+            <button type="button" class="calendar-today-btn" data-calendar-today>Hoje</button>
+            <button type="button" class="calendar-nav-btn" data-calendar-nav="-1" aria-label="Anterior" ${canPrev ? '' : 'disabled'}>${CALENDAR_CHEVRON_LEFT}</button>
+            <button type="button" class="calendar-nav-btn" data-calendar-nav="1" aria-label="Próximo" ${canNext ? '' : 'disabled'}>${CALENDAR_CHEVRON_RIGHT}</button>
+            <button type="button" class="calendar-nav-btn" data-calendar-refresh title="Atualizar calendário" aria-label="Atualizar calendário">${CALENDAR_REFRESH_SVG}</button>
+          </div>
+        </div>
+      </div>
+      ${mainBodyHtml}
+    </div>`;
+
+  wrap.querySelectorAll('[data-calendar-view]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      libraryCalendarState.view = btn.dataset.calendarView || 'month';
+      drawLibraryCalendar();
+    });
+  });
+
+  const filterInput = wrap.querySelector('#cal-series-filter');
+  if (filterInput) {
+    filterInput.addEventListener('input', (e) => {
+      const caret = e.target.selectionStart;
+      libraryCalendarState.query = e.target.value;
+      drawLibraryCalendar();
+      const restored = document.getElementById('cal-series-filter');
+      if (restored) {
+        restored.focus();
+        if (caret != null) restored.setSelectionRange(caret, caret);
+      }
+    });
+  }
+
+  wrap.querySelector('[data-calendar-refresh]')?.addEventListener('click', () => {
+    loadLibraryCalendar(true);
+  });
+
+  wrap.querySelectorAll('[data-calendar-nav]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const delta = Number(btn.dataset.calendarNav) || 0;
+      if (!delta) return;
+      if (libraryCalendarState.view === 'week') {
+        const cur = calendarParseDay(libraryCalendarState.selected) || today;
+        const next = new Date(cur.getFullYear(), cur.getMonth(), cur.getDate() + delta * 7);
+        libraryCalendarState.selected = calendarDayKey(next);
+        libraryCalendarState.month = calendarStartOfMonth(next);
+      } else {
+        libraryCalendarState.month = new Date(month.getFullYear(), month.getMonth() + delta, 1);
+      }
+      drawLibraryCalendar();
+    });
+  });
+
+  wrap.querySelector('[data-calendar-today]')?.addEventListener('click', () => {
+    libraryCalendarState.selected = todayKey;
+    libraryCalendarState.month = calendarStartOfMonth(today);
+    drawLibraryCalendar();
+  });
+
+  wrap.querySelectorAll('[data-calendar-day]').forEach((el) => {
+    el.addEventListener('click', (e) => {
+      if (e.target.closest('.calendar-item')) return;
+      libraryCalendarState.selected = el.dataset.calendarDay;
+      drawLibraryCalendar();
+    });
+  });
+
+  wrap.querySelectorAll('.calendar-item').forEach((el) => {
+    el.addEventListener('click', () => {
+      const id = el.dataset.calendarId;
+      if (!id) return;
+      openDetailsPage({ id, type: 'series', name: el.dataset.calendarName || '', poster: el.dataset.calendarPoster || '' });
+    });
+  });
+}
+
+async function loadLibraryCalendar(force = false) {
+  const wrap = document.getElementById('library-calendar');
+  const status = document.getElementById('library-calendar-status');
+  if (!wrap || libraryCalendarLoading) return;
+  const series = librarySeriesForCalendar();
+  if (!series.length) {
+    wrap.innerHTML = '';
+    if (status) status.textContent = 'Ainda não há séries na biblioteca para o calendário.';
+    return;
+  }
+  const signature = series.map((s) => s.id).join(',');
+  const cached = readLibraryCalendarCache();
+  if (!force && cached?.signature === signature && Date.now() - Number(cached.at || 0) < LIBRARY_CALENDAR_TTL_MS) {
+    renderLibraryCalendar(cached.items, cached.tmdbIds);
+    if (status) status.textContent = '';
+    return;
+  }
+  libraryCalendarLoading = true;
+  try {
+    if (status) status.textContent = 'A preparar o calendário…';
+    const tmdbIds = await resolveCalendarTmdbIds(
+      series.slice(0, LIBRARY_CALENDAR_MAX_SERIES),
+      cached?.tmdbIds,
+      (done, total) => {
+        if (status) status.textContent = `A identificar séries no TMDB… ${done}/${total}`;
+      },
+    );
+    const ids = [...new Set(Object.values(tmdbIds))];
+    let items = [];
+    if (ids.length) {
+      if (status) status.textContent = 'A buscar os episódios…';
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      items = (await invoke('tmdb_next_episodes', { series: ids, from: calendarDayKey(today) }).catch(() => [])) || [];
+    }
+    localStorage.setItem(LIBRARY_CALENDAR_CACHE_KEY, JSON.stringify({ signature, at: Date.now(), tmdbIds, items }));
+    renderLibraryCalendar(items, tmdbIds);
+    if (status) {
+      status.textContent = items.length
+        ? ''
+        : ids.length
+          ? 'Sem estreias anunciadas para as séries da biblioteca.'
+          : 'Ativa o TMDB em Integrações → Serviços conectados para ver o calendário.';
+    }
+  } finally {
+    libraryCalendarLoading = false;
+  }
+}
+
+function toggleLibraryCalendar() {
+  setLibrarySubTab(librarySubTab === 'calendar' ? 'saved' : 'calendar');
+}
+
+document.getElementById('btn-library-calendar')?.addEventListener('click', toggleLibraryCalendar);
+
 document.getElementById('btn-library-layout')?.addEventListener('click', () => {
   libraryListMode = !libraryListMode;
   renderFilteredLibrary();
   renderFollowingSection();
 });
 
-['library-filter-q', 'library-filter-type', 'library-filter-watched', 'library-sort'].forEach((id) => {
+['library-filter-q', 'library-filter-type', 'library-filter-watched', 'library-sort', 'library-mdblist-list'].forEach((id) => {
   const el = document.getElementById(id);
   if (!el) return;
   el.addEventListener('input', renderFilteredLibrary);
@@ -5733,7 +6809,7 @@ async function refreshLibrary() {
   if (librarySubTab === 'saved' && status) {
     status.textContent = 'Sincronizando biblioteca…';
   }
-  await refreshLibraryState();
+  await refreshLibraryState(true);
   renderFilteredLibrary();
 }
 
@@ -5756,12 +6832,45 @@ function renderFilteredLibrary() {
   const grid = document.getElementById('library-grid');
   if (!grid) return;
 
+  const source = activeLibrarySource();
+  const mdbListSelect = document.getElementById('library-mdblist-list');
+  if (mdbListSelect) {
+    const lists = mdblistLibraryCache.lists || [];
+    if (source === 'mdblist' && lists.length) {
+      const prev = mdbListSelect.value;
+      const opts = [{ key: 'all', name: 'Todas as listas' }, ...lists];
+      const nextSig = opts.map((o) => `${o.key}:${o.name}`).join('|');
+      if (mdbListSelect.dataset.sig !== nextSig) {
+        mdbListSelect.dataset.sig = nextSig;
+        mdbListSelect.innerHTML = opts.map((o) => `<option value="${esc(o.key)}">${esc(o.name)}</option>`).join('');
+        mdbListSelect.value = opts.some((o) => o.key === prev) ? prev : 'watchlist';
+      }
+      mdbListSelect.classList.remove('hidden');
+    } else {
+      mdbListSelect.classList.add('hidden');
+    }
+  }
+
   const q = (document.getElementById('library-filter-q')?.value || '').trim().toLowerCase();
   const typeF = document.getElementById('library-filter-type')?.value || 'all';
   const watchF = document.getElementById('library-filter-watched')?.value || 'all';
   const sortF = document.getElementById('library-sort')?.value || 'recent';
+  const listF = source === 'mdblist' && mdbListSelect && !mdbListSelect.classList.contains('hidden')
+    ? mdbListSelect.value
+    : 'all';
 
   let items = [...libraryRawItems];
+  if (listF && listF !== 'all') {
+    items = items.filter((it) => it.list_key === listF);
+  } else if (source === 'mdblist') {
+    const seen = new Set();
+    items = items.filter((it) => {
+      const k = libKey(it.content_id || it.id, it.content_type || it.type);
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+  }
   if (q) {
     items = items.filter((it) => (it.name || '').toLowerCase().includes(q));
   }
@@ -5774,10 +6883,19 @@ function renderFilteredLibrary() {
     items = items.filter((it) => !watchedSet.has(it.content_id || it.id));
   }
 
-  if (sortF === 'title') {
+  if (sortF === 'oldest') {
+    items.sort((a, b) => (Number(a.added_at) || 0) - (Number(b.added_at) || 0));
+    if (items.every((it) => !it.added_at)) items.reverse();
+  } else if (sortF === 'title') {
     items.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  } else if (sortF === 'title_desc') {
+    items.sort((a, b) => (b.name || '').localeCompare(a.name || ''));
   } else if (sortF === 'year') {
     items.sort((a, b) => (parseInt(b.release_info, 10) || 0) - (parseInt(a.release_info, 10) || 0));
+  } else {
+    if (items.some((it) => Number(it.added_at) > 0)) {
+      items.sort((a, b) => (Number(b.added_at) || 0) - (Number(a.added_at) || 0));
+    }
   }
 
   if (librarySubTab === 'saved' && status) {
@@ -5786,7 +6904,10 @@ function renderFilteredLibrary() {
 
   if (!items.length) {
     grid.className = 'library-shelves';
-    grid.innerHTML = '<div class="muted">Nenhum título encontrado na biblioteca.</div>';
+    const emptyMsg = source === 'mdblist' && mdblistLibraryCache.error
+      ? esc(mdblistLibraryCache.error)
+      : 'Nenhum título encontrado na biblioteca.';
+    grid.innerHTML = `<div class="muted">${emptyMsg}</div>`;
     return;
   }
 
@@ -5821,12 +6942,17 @@ function renderFilteredLibrary() {
 function selectSettingsSection(id) {
   if (!id) return;
   if (id === "connected" || id === "cloud") refreshConnectedAccounts();
+  if (id === "system") refreshDiagnostics();
+  const sidebarKey = id === 'cloud' ? 'connected' : id;
   document.querySelectorAll('.settings-cat-btn').forEach((b) => {
-    b.classList.toggle('active', b.dataset.settingsSec === id);
+    b.classList.toggle('active', b.dataset.settingsSec === sidebarKey);
   });
   document.querySelectorAll('.settings-section').forEach((s) => {
     s.classList.toggle('active', s.id === `sec-${id}`);
   });
+  if (id === 'simkl' && typeof window.refreshMdblistAccountCard === 'function') {
+    window.refreshMdblistAccountCard(true);
+  }
 }
 
 document.querySelectorAll('.settings-cat-btn').forEach((btn) => {
@@ -5864,6 +6990,18 @@ document.getElementById('btn-sign-out').addEventListener('click', async () => {
 function applySettingsToUi(s, patch = null) {
   appSettings = s;
   if (!patch || patch.connected || patch.seekr) applyConnectedPreferences(s);
+  if (patch?.services) applyServiceForm(s);
+  const libSrcSelect = document.getElementById('library-source-select');
+  if (libSrcSelect) {
+    libSrcSelect.value = activeLibrarySource();
+  }
+  const progSrcSelect = document.getElementById('progress-source-select');
+  if (progSrcSelect) {
+    progSrcSelect.value = activeProgressSource();
+  }
+  if (typeof window.refreshMdblistAccountCard === 'function') {
+    window.refreshMdblistAccountCard(false);
+  }
   const theme = s.theme || 'white';
   document.body.dataset.theme = theme;
   if (theme === 'custom' && Array.isArray(s.custom_theme_colors)) {
@@ -6121,6 +7259,9 @@ document.querySelectorAll('[data-service]').forEach((el) => {
   if (DISCORD_SERVICE_KEYS.has(el.dataset.service)) return;
   el.addEventListener('change', persistServiceForm);
 });
+document.querySelectorAll('[data-provider]').forEach((el) => {
+  el.addEventListener('change', persistServiceForm);
+});
 document.getElementById('set-tmdb-key')?.addEventListener('change', persistServiceForm);
 
 
@@ -6224,7 +7365,7 @@ function renderAddonsList(list) {
       try {
         const updated = await invoke('toggle_addon', { manifestUrl: input.dataset.toggleAddon, enabled: input.checked });
         renderAddonsList(updated);
-        refreshHomeProgressive();
+        refreshHomeProgressive(true);
       } catch (e) {
         statusEl.textContent = String(e);
       }
@@ -6236,7 +7377,7 @@ function renderAddonsList(list) {
       try {
         const updated = await invoke('move_addon', { manifestUrl: btn.dataset.moveAddon, delta: Number(btn.dataset.delta) });
         renderAddonsList(updated);
-        refreshHomeProgressive();
+        refreshHomeProgressive(true);
       } catch (e) {
         statusEl.textContent = String(e);
       }
@@ -6250,7 +7391,7 @@ function renderAddonsList(list) {
         const updated = await invoke('refresh_addon', { manifestUrl: btn.dataset.refreshAddon });
         statusEl.textContent = 'Addon atualizado.';
         renderAddonsList(updated);
-        refreshHomeProgressive();
+        refreshHomeProgressive(true);
       } catch (e) {
         statusEl.textContent = String(e);
       }
@@ -6269,7 +7410,7 @@ function renderAddonsList(list) {
       if (!ok) return;
       const updated = await invoke('remove_addon', { manifestUrl: btn.dataset.delAddon });
       renderAddonsList(updated);
-      refreshHomeProgressive();
+      refreshHomeProgressive(true);
       showToast('Addon removido.');
     });
   });
@@ -6289,7 +7430,7 @@ document.getElementById('btn-add-addon').addEventListener('click', async () => {
     const installed = await invoke('add_addon', { manifestUrl: url });
     status.textContent = `Instalado: ${installed.manifest.name}`;
     document.getElementById('addon-url-input').value = '';
-    await Promise.all([refreshAddons(), refreshHomeProgressive()]);
+    await Promise.all([refreshAddons(), refreshHomeProgressive(true)]);
   } catch (e) {
     status.textContent = String(e);
   }
@@ -6352,6 +7493,7 @@ function renderPluginsUi(ps) {
         ${s.description ? `<span class="nv-desc">${esc(s.description)}</span>` : ''}
       </span>
       <span class="nv-addon-side">
+        ${s.has_settings ? `<button class="addon-icon-btn" data-config-scraper="${esc(s.id)}" data-scraper-name="${esc(s.name)}" title="Configurações do provedor">${SVG_CONFIG}</button>` : ''}
         <button class="btn-ghost nv-mini-btn" data-test-scraper="${esc(s.id)}">Testar</button>
         <label class="nuvio-switch">
           <input type="checkbox" data-toggle-scraper="${esc(s.id)}" ${s.enabled ? 'checked' : ''} />
@@ -6378,6 +7520,157 @@ function renderPluginsUi(ps) {
       }
     };
   });
+  scrapersEl.querySelectorAll('[data-config-scraper]').forEach((btn) => {
+    btn.onclick = () => openPluginSettingsModal(btn.dataset.configScraper, btn.dataset.scraperName || btn.dataset.configScraper);
+  });
+}
+
+async function openPluginSettingsModal(scraperId, scraperName) {
+  const modal = document.getElementById('plugin-settings-modal');
+  const titleEl = document.getElementById('plugin-settings-title');
+  const bodyEl = document.getElementById('plugin-settings-body');
+  const cancelBtn = document.getElementById('btn-plugin-settings-cancel');
+  const saveBtn = document.getElementById('btn-plugin-settings-save');
+  if (!modal || !bodyEl) return;
+
+  titleEl.textContent = `Configurações · ${scraperName}`;
+  bodyEl.innerHTML = '<div class="nv-note">Carregando opções do provedor…</div>';
+  saveBtn.disabled = true;
+  modal.classList.remove('hidden');
+
+  const closeModal = () => modal.classList.add('hidden');
+  cancelBtn.onclick = closeModal;
+  modal.onclick = (e) => {
+    if (e.target === modal) closeModal();
+  };
+
+  try {
+    const res = await invoke('get_plugin_settings_layout', { scraperId });
+    const layout = Array.isArray(res?.layout) ? res.layout : [];
+    const draft = { ...(res?.values && typeof res.values === 'object' ? res.values : {}) };
+
+    if (!layout.length) {
+      bodyEl.innerHTML = '<div class="nv-note">Este provedor não expôs opções configuráveis.</div>';
+      return;
+    }
+
+    bodyEl.innerHTML = '';
+    for (const field of layout) {
+      if (!field || typeof field !== 'object') continue;
+      const type = String(field.type || 'info');
+      const key = String(field.key || '');
+      const label = String(field.label || '');
+      const desc = field.description ? String(field.description) : '';
+
+      if (type === 'header') {
+        const h = document.createElement('h4');
+        h.className = 'plugin-setting-header';
+        h.textContent = label;
+        bodyEl.appendChild(h);
+      } else if (type === 'info') {
+        const p = document.createElement('p');
+        p.className = 'plugin-setting-desc';
+        p.textContent = label;
+        bodyEl.appendChild(p);
+      } else if (type === 'text' && key) {
+        const wrap = document.createElement('div');
+        wrap.className = 'plugin-setting-field';
+        const lbl = document.createElement('label');
+        lbl.textContent = label;
+        const input = document.createElement('input');
+        input.type = field.isPassword ? 'password' : 'text';
+        input.placeholder = String(field.placeholder || '');
+        input.value = String(draft[key] ?? field.defaultValue ?? '');
+        input.addEventListener('input', () => {
+          draft[key] = input.value;
+        });
+        wrap.append(lbl, input);
+        if (desc) {
+          const p = document.createElement('p');
+          p.className = 'plugin-setting-desc';
+          p.textContent = desc;
+          wrap.appendChild(p);
+        }
+        bodyEl.appendChild(wrap);
+      } else if (type === 'select' && key) {
+        const options = Array.isArray(field.options) ? field.options : [];
+        const current = String(draft[key] ?? field.defaultValue ?? '');
+        if (!(key in draft)) draft[key] = current;
+
+        const wrap = document.createElement('div');
+        wrap.className = 'plugin-setting-field';
+        const lbl = document.createElement('label');
+        lbl.textContent = label;
+        const select = document.createElement('select');
+        for (const opt of options) {
+          const optEl = document.createElement('option');
+          optEl.value = String(opt?.value ?? '');
+          optEl.textContent = String(opt?.label ?? opt?.value ?? '');
+          optEl.selected = optEl.value === current;
+          select.appendChild(optEl);
+        }
+        select.addEventListener('change', () => {
+          draft[key] = select.value;
+        });
+        wrap.append(lbl, select);
+        if (desc) {
+          const p = document.createElement('p');
+          p.className = 'plugin-setting-desc';
+          p.textContent = desc;
+          wrap.appendChild(p);
+        }
+        bodyEl.appendChild(wrap);
+      } else if (type === 'toggle' && key) {
+        const current = key in draft ? Boolean(draft[key]) : Boolean(field.defaultValue);
+        if (!(key in draft)) draft[key] = current;
+
+        const row = document.createElement('label');
+        row.className = 'toggle-row plugin-setting-toggle';
+        const copy = document.createElement('span');
+        copy.className = 'plugin-setting-toggle-copy';
+        const titleSpan = document.createElement('span');
+        titleSpan.textContent = label;
+        copy.appendChild(titleSpan);
+        if (desc) {
+          const descSpan = document.createElement('span');
+          descSpan.className = 'plugin-setting-desc';
+          descSpan.textContent = desc;
+          copy.appendChild(descSpan);
+        }
+
+        const sw = document.createElement('span');
+        sw.className = 'nuvio-switch';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = current;
+        cb.addEventListener('change', () => {
+          draft[key] = cb.checked;
+        });
+        const track = document.createElement('span');
+        track.className = 'nuvio-switch-track';
+        sw.append(cb, track);
+
+        row.append(copy, sw);
+        bodyEl.appendChild(row);
+      }
+    }
+
+    saveBtn.disabled = false;
+    saveBtn.onclick = async () => {
+      saveBtn.disabled = true;
+      try {
+        await invoke('save_plugin_scraper_settings', { scraperId, settings: draft });
+        showToast('Configurações do provedor salvas.');
+        closeModal();
+      } catch (e) {
+        showToast(String(e));
+      } finally {
+        saveBtn.disabled = false;
+      }
+    };
+  } catch (e) {
+    bodyEl.innerHTML = `<div class="auth-error">${esc(String(e))}</div>`;
+  }
 }
 
 async function refreshPluginsState() {
@@ -6451,13 +7744,284 @@ async function refreshDiagnostics() {
     `OS: ${d.os} (${d.arch})\nConfig: ${d.config_dir}\nCache: ${d.cache_dir}\nSQLite: ${d.sqlite_ok} | Redb: ${d.redb_ok}\nmpv: ${d.mpv_available}\nEngine (${d.engine_library_name}): found=${d.engine_found} api=${d.engine_api_version ?? '-'} libtorrent=${d.engine_backend_version ?? '-'}`;
 }
 
+// --- NUVIO CUSTOM CHIP DROPDOWNS ---
+const NV_DROPDOWN_CHEVRON = '<svg viewBox="0 0 24 24" class="nv-chip-trigger-chevron" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="M6 9l6 6 6-6"/></svg>';
+const NV_DROPDOWN_CHECK = '<svg viewBox="0 0 24 24" class="nv-dropdown-check" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="M20 6L9 17l-5-5"/></svg>';
+let openNuvioDropdownState = null;
+
+function closeNuvioDropdown() {
+  if (!openNuvioDropdownState) return;
+  openNuvioDropdownState.wrap.classList.remove('is-open');
+  openNuvioDropdownState.trigger.setAttribute('aria-expanded', 'false');
+  openNuvioDropdownState.menu.classList.add('hidden');
+  openNuvioDropdownState = null;
+}
+
+function positionNuvioDropdownMenu(trigger, menu) {
+  const rect = trigger.getBoundingClientRect();
+  const margin = 12;
+  menu.style.left = `${margin}px`;
+  menu.style.top = `${Math.round(rect.bottom + 8)}px`;
+  const menuRect = menu.getBoundingClientRect();
+  const maxLeft = Math.max(margin, window.innerWidth - menuRect.width - margin);
+  const left = Math.min(Math.max(margin, rect.left), maxLeft);
+  let top = rect.bottom + 8;
+  if (top + menuRect.height > window.innerHeight - margin && rect.top - menuRect.height - 8 >= margin) {
+    top = rect.top - menuRect.height - 8;
+  }
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(top)}px`;
+}
+
+function upgradeNuvioChipSelect(selectEl) {
+  if (!selectEl || selectEl.dataset.nvDropdownUpgraded) return;
+  selectEl.dataset.nvDropdownUpgraded = '1';
+  selectEl.classList.add('is-upgraded');
+
+  const wrap = document.createElement('div');
+  wrap.className = 'nv-chip-dropdown';
+  const trigger = document.createElement('button');
+  trigger.type = 'button';
+  trigger.className = 'nv-chip-trigger';
+  trigger.setAttribute('aria-haspopup', 'listbox');
+  trigger.setAttribute('aria-expanded', 'false');
+  const labelSpan = document.createElement('span');
+  labelSpan.className = 'nv-chip-trigger-label';
+  trigger.append(labelSpan);
+  trigger.insertAdjacentHTML('beforeend', NV_DROPDOWN_CHEVRON);
+
+  const menu = document.createElement('div');
+  menu.className = 'nv-dropdown-menu hidden';
+  menu.setAttribute('role', 'listbox');
+
+  selectEl.insertAdjacentElement('afterend', wrap);
+  wrap.append(trigger);
+  document.body.append(menu);
+
+  const sync = () => {
+    const opts = Array.from(selectEl.options || []);
+    const selected = opts.find((o) => o.value === selectEl.value) || opts[0];
+    labelSpan.textContent = selected ? selected.textContent : '';
+    trigger.disabled = !!selectEl.disabled || opts.length === 0;
+    wrap.classList.toggle('hidden', selectEl.classList.contains('hidden'));
+    menu.innerHTML = opts.map((opt) => {
+      const isSel = opt.value === selectEl.value;
+      return `
+        <button type="button" class="nv-dropdown-option${isSel ? ' is-selected' : ''}" role="option" aria-selected="${isSel ? 'true' : 'false'}" data-nv-opt="${esc(opt.value)}">
+          <span class="nv-dropdown-option-label">${esc(opt.textContent)}</span>
+          ${isSel ? NV_DROPDOWN_CHECK : ''}
+        </button>`;
+    }).join('');
+    menu.querySelectorAll('[data-nv-opt]').forEach((btn) => {
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const nextVal = btn.dataset.nvOpt;
+        const changed = selectEl.value !== nextVal;
+        selectEl.value = nextVal;
+        closeNuvioDropdown();
+        if (changed) selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+    });
+  };
+
+  trigger.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    if (trigger.disabled) return;
+    if (openNuvioDropdownState?.selectEl === selectEl) {
+      closeNuvioDropdown();
+      return;
+    }
+    closeNuvioDropdown();
+    sync();
+    menu.classList.remove('hidden');
+    wrap.classList.add('is-open');
+    trigger.setAttribute('aria-expanded', 'true');
+    positionNuvioDropdownMenu(trigger, menu);
+    openNuvioDropdownState = { selectEl, wrap, trigger, menu };
+  });
+
+  selectEl.addEventListener('change', sync);
+  const observer = new MutationObserver(sync);
+  observer.observe(selectEl, { childList: true, attributes: true, attributeFilter: ['disabled', 'class'] });
+  sync();
+}
+
+function initNuvioChipDropdowns() {
+  document.querySelectorAll('select.nuvio-chip-select').forEach(upgradeNuvioChipSelect);
+  document.addEventListener('click', (ev) => {
+    if (openNuvioDropdownState && !openNuvioDropdownState.wrap.contains(ev.target) && !openNuvioDropdownState.menu.contains(ev.target)) {
+      closeNuvioDropdown();
+    }
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') closeNuvioDropdown();
+  });
+  window.addEventListener('resize', closeNuvioDropdown);
+  document.getElementById('main-viewport')?.addEventListener('scroll', closeNuvioDropdown, { passive: true });
+}
+
+// --- APP UPDATER (GITHUB RELEASES) ---
+let activeUpdateInfo = null;
+let updateCheckInFlight = false;
+let updateProgressUnlisten = null;
+let updateBootChecked = false;
+
+function formatBytesMb(bytes) {
+  if (!bytes || bytes <= 0) return '0 MB';
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function showAppUpdateModal(info) {
+  activeUpdateInfo = info;
+  const modal = document.getElementById('app-update-modal');
+  const verEl = document.getElementById('app-update-version');
+  const notesEl = document.getElementById('app-update-notes');
+  const progressWrap = document.getElementById('app-update-progress-wrap');
+  const progressFill = document.getElementById('app-update-progress-fill');
+  const progressLabel = document.getElementById('app-update-progress-label');
+  const errEl = document.getElementById('app-update-error');
+  const installBtn = document.getElementById('btn-update-install');
+  const laterBtn = document.getElementById('btn-update-later');
+  const releaseBtn = document.getElementById('btn-update-release');
+  if (!modal) return;
+
+  verEl.textContent = `v${info.currentVersion} → v${info.latestVersion}`;
+  if (info.releaseNotes) {
+    notesEl.textContent = info.releaseNotes;
+    notesEl.classList.remove('hidden');
+  } else {
+    notesEl.textContent = '';
+    notesEl.classList.add('hidden');
+  }
+
+  progressWrap.classList.add('hidden');
+  progressFill.style.width = '0%';
+  progressLabel.textContent = 'Preparando download…';
+  errEl.textContent = '';
+  errEl.classList.add('hidden');
+
+  const canInstall = Boolean(info.canSelfInstall && info.assetUrl);
+  installBtn.classList.toggle('hidden', !canInstall);
+  installBtn.disabled = false;
+  installBtn.textContent = 'Atualizar agora';
+  laterBtn.disabled = false;
+  releaseBtn.disabled = false;
+
+  modal.classList.remove('hidden');
+}
+
+function hideAppUpdateModal(dismissCurrent = false) {
+  if (dismissCurrent && activeUpdateInfo?.latestVersion) {
+    try { sessionStorage.setItem('nuvio_dismissed_update', activeUpdateInfo.latestVersion); } catch {}
+  }
+  document.getElementById('app-update-modal')?.classList.add('hidden');
+}
+
+async function checkForAppUpdates({ silent = true } = {}) {
+  if (updateCheckInFlight) return;
+  updateCheckInFlight = true;
+  const statusEl = document.getElementById('app-update-status');
+  const checkBtn = document.getElementById('btn-check-updates');
+  if (!silent && statusEl) statusEl.textContent = 'Verificando atualizações…';
+  if (!silent && checkBtn) checkBtn.disabled = true;
+
+  try {
+    const info = await invoke('check_app_update');
+    if (statusEl) {
+      statusEl.textContent = info.updateAvailable
+        ? `Nova versão disponível: v${info.latestVersion} (atual: v${info.currentVersion}).`
+        : `Você já está na versão mais recente (v${info.currentVersion}).`;
+    }
+    if (info.updateAvailable) {
+      let dismissed = null;
+      try { dismissed = sessionStorage.getItem('nuvio_dismissed_update'); } catch {}
+      if (!silent || dismissed !== info.latestVersion) {
+        showAppUpdateModal(info);
+      }
+    } else if (!silent) {
+      showToast(`Você já está na versão mais recente (v${info.currentVersion}).`);
+    }
+  } catch (e) {
+    if (statusEl && !silent) statusEl.textContent = String(e);
+    if (!silent) showToast(String(e));
+  } finally {
+    updateCheckInFlight = false;
+    if (checkBtn) checkBtn.disabled = false;
+  }
+}
+
+document.getElementById('btn-check-updates')?.addEventListener('click', () => {
+  checkForAppUpdates({ silent: false });
+});
+
+document.getElementById('btn-update-later')?.addEventListener('click', () => {
+  hideAppUpdateModal(true);
+});
+
+document.getElementById('btn-update-release')?.addEventListener('click', () => {
+  if (activeUpdateInfo?.releaseUrl) {
+    invoke('open_external_url', { url: activeUpdateInfo.releaseUrl }).catch((e) => showToast(String(e)));
+  }
+});
+
+document.getElementById('btn-update-install')?.addEventListener('click', async () => {
+  if (!activeUpdateInfo?.assetUrl) return;
+  const progressWrap = document.getElementById('app-update-progress-wrap');
+  const progressFill = document.getElementById('app-update-progress-fill');
+  const progressLabel = document.getElementById('app-update-progress-label');
+  const errEl = document.getElementById('app-update-error');
+  const installBtn = document.getElementById('btn-update-install');
+  const laterBtn = document.getElementById('btn-update-later');
+
+  errEl.classList.add('hidden');
+  progressWrap.classList.remove('hidden');
+  installBtn.disabled = true;
+  laterBtn.disabled = true;
+  installBtn.textContent = 'Baixando…';
+
+  if (updateProgressUnlisten) {
+    updateProgressUnlisten();
+    updateProgressUnlisten = null;
+  }
+  updateProgressUnlisten = await listen('app:update_progress', (ev) => {
+    const p = ev.payload || {};
+    const pct = Math.max(0, Math.min(100, Math.round(p.percent || 0)));
+    progressFill.style.width = `${pct}%`;
+    progressLabel.textContent = p.totalBytes > 0
+      ? `Baixando atualização: ${pct}% (${formatBytesMb(p.downloadedBytes)} / ${formatBytesMb(p.totalBytes)})`
+      : `Baixando atualização: ${formatBytesMb(p.downloadedBytes)}`;
+  });
+
+  try {
+    await invoke('install_app_update', {
+      assetUrl: activeUpdateInfo.assetUrl,
+      assetSize: activeUpdateInfo.assetSize ?? null,
+    });
+  } catch (e) {
+    errEl.textContent = String(e);
+    errEl.classList.remove('hidden');
+    installBtn.disabled = false;
+    laterBtn.disabled = false;
+    installBtn.textContent = 'Tentar novamente';
+  } finally {
+    if (updateProgressUnlisten) {
+      updateProgressUnlisten();
+      updateProgressUnlisten = null;
+    }
+  }
+});
+
 // --- BOOT ---
 (async function boot() {
+  initNuvioChipDropdowns();
   let status = null;
   try {
-    const settings = await invoke('load_settings');
+    const [settings, authRes] = await Promise.all([
+      invoke('load_settings'),
+      invoke('get_auth_status'),
+    ]);
     applySettingsToUi(settings);
-    status = await invoke('get_auth_status');
+    status = authRes;
     authState = status;
     if (status.server?.backend_url) {
       document.getElementById('auth-server-pill').textContent = status.server.backend_url.replace(/^https?:\/\//, '');
@@ -6470,5 +8034,10 @@ async function refreshDiagnostics() {
     await enterMainApp(status);
   } else {
     showView('view-auth');
+  }
+
+  if (!updateBootChecked) {
+    updateBootChecked = true;
+    setTimeout(() => checkForAppUpdates({ silent: true }), 2500);
   }
 })();
