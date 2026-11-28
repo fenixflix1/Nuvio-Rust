@@ -129,6 +129,37 @@ impl TmdbClient {
         Ok(serde_json::from_str(&body)?)
     }
 
+    /// Resolve a TV show's TMDB id directly from an IMDb id via `/find/{imdb_id}`.
+    pub async fn find_by_imdb(&self, imdb_id: &str) -> Result<Option<u64>> {
+        let trimmed = imdb_id.trim();
+        if !trimmed.starts_with("tt") {
+            return Ok(None);
+        }
+        let resp = self
+            .http
+            .get(format!("{TMDB_BASE_URL}/find/{trimmed}"))
+            .query(&[
+                ("api_key", self.api_key.as_str()),
+                ("external_source", "imdb_id"),
+                ("language", self.language.as_str()),
+            ])
+            .send()
+            .await?;
+        let status = resp.status();
+        let body = resp.text().await?;
+        if !status.is_success() {
+            return Err(IntegrationError::Api {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        let val: Value = serde_json::from_str(&body)?;
+        Ok(val["tv_results"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|item| item["id"].as_u64()))
+    }
+
     async fn get_resource(&self, path: &str, append: &str) -> Result<Value> {
         let resp = self
             .http

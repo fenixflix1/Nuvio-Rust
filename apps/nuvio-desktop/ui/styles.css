@@ -2959,7 +2959,8 @@ input:focus, select:focus, textarea:focus { border-color: var(--focus-ring); }
   margin-top: 0;
 }
 #library-panel-saved[hidden],
-#library-panel-following[hidden] {
+#library-panel-following[hidden],
+#library-panel-calendar[hidden] {
   display: none;
 }
 .following-person-card {
@@ -5276,4 +5277,51 @@ select.nv-value option { background: var(--bg-elevated); color: var(--text-prima
   max-height: 100%;
   object-fit: contain;
   background: #000;
+}
+.cal-state-card {
+  min-height: 260px;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+}
+.cal-state-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  max-width: 420px;
+}
+.cal-state-msg {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.cal-skeleton-cell,
+.cal-skeleton-row {
+  position: relative;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.05);
+}
+.cal-skeleton-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.cal-skeleton-row {
+  height: 76px;
+  border-radius: 14px;
+}
+.cal-skeleton-cell::after,
+.cal-skeleton-row::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.06), transparent);
+  transform: translateX(-100%);
+  animation: cal-shimmer 1.3s infinite;
+}
+@keyframes cal-shimmer {
+  100% { transform: translateX(100%); }
 }

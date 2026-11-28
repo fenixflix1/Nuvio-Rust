@@ -1,5 +1,6 @@
 use nuvio_core::integrations::{mdblist::MdbListClient, shared_http_client, tmdb::TmdbClient};
 use nuvio_core::plugins::resolve_imdb_to_tmdb;
+use nuvio_core::storage::CacheStore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -894,6 +895,31 @@ fn url_encode_query(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
+fn tvmaze_semaphore() -> &'static tokio::sync::Semaphore {
+    static SEM: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    SEM.get_or_init(|| tokio::sync::Semaphore::new(6))
+}
+
+async fn tvmaze_get_json(http: &reqwest::Client, url: &str) -> Option<Value> {
+    for attempt in 0..2 {
+        let permit = tvmaze_semaphore().acquire().await.ok()?;
+        let Ok(resp) = http.get(url).send().await else {
+            return None;
+        };
+        let status = resp.status();
+        if status.as_u16() == 429 && attempt == 0 {
+            drop(permit);
+            tokio::time::sleep(std::time::Duration::from_millis(650)).await;
+            continue;
+        }
+        if !status.is_success() {
+            return None;
+        }
+        return resp.json::<Value>().await.ok();
+    }
+    None
+}
+
 async fn fetch_tvmaze_show_with_episodes(
     http: &reqwest::Client,
     imdb_id: Option<&str>,
@@ -902,14 +928,9 @@ async fn fetch_tvmaze_show_with_episodes(
 ) -> Option<Value> {
     let mut resolved_id = if let Some(imdb) = imdb_id.filter(|s| s.starts_with("tt")) {
         let url = format!("https://api.tvmaze.com/lookup/shows?imdb={imdb}");
-        if let Ok(resp) = http.get(url).send().await
-            && resp.status().is_success()
-            && let Ok(val) = resp.json::<Value>().await
-        {
-            val["id"].as_u64()
-        } else {
-            None
-        }
+        tvmaze_get_json(http, &url)
+            .await
+            .and_then(|val| val["id"].as_u64())
     } else {
         None
     };
@@ -918,20 +939,14 @@ async fn fetch_tvmaze_show_with_episodes(
         && let Some(tvdb) = tvdb_id.filter(|&v| v > 0)
     {
         let url = format!("https://api.tvmaze.com/lookup/shows?thetvdb={tvdb}");
-        if let Ok(resp) = http.get(url).send().await
-            && resp.status().is_success()
-            && let Ok(val) = resp.json::<Value>().await
-        {
-            resolved_id = val["id"].as_u64();
-        }
+        resolved_id = tvmaze_get_json(http, &url)
+            .await
+            .and_then(|val| val["id"].as_u64());
     }
 
     if let Some(show_id) = resolved_id {
         let url = format!("https://api.tvmaze.com/shows/{show_id}?embed=episodes");
-        if let Ok(resp) = http.get(url).send().await
-            && resp.status().is_success()
-            && let Ok(val) = resp.json::<Value>().await
-        {
+        if let Some(val) = tvmaze_get_json(http, &url).await {
             return Some(val);
         }
     }
@@ -942,46 +957,141 @@ async fn fetch_tvmaze_show_with_episodes(
             "https://api.tvmaze.com/singlesearch/shows?q={}&embed=episodes",
             url_encode_query(trimmed)
         );
-        if let Ok(resp) = http.get(url).send().await
-            && resp.status().is_success()
-            && let Ok(val) = resp.json::<Value>().await
-        {
+        if let Some(val) = tvmaze_get_json(http, &url).await {
             return Some(val);
         }
     }
     None
 }
 
+async fn fetch_tmdb_calendar_data(
+    client: &TmdbClient,
+    cache: Option<&CacheStore>,
+    initial_tmdb_id: Option<u64>,
+    initial_imdb: Option<&str>,
+) -> (Option<u64>, Option<Value>, BTreeMap<(u64, u64), Value>) {
+    let mut resolved_tid = initial_tmdb_id;
+    if resolved_tid.is_none()
+        && let Some(imdb) = initial_imdb.filter(|s| s.starts_with("tt"))
+    {
+        let map_key = format!("imdb_tmdb_tv:{imdb}");
+        if let Some(store) = cache
+            && let Ok(Some(raw)) = store.get(&map_key)
+            && let Ok(parsed) = serde_json::from_slice::<u64>(&raw)
+            && parsed > 0
+        {
+            resolved_tid = Some(parsed);
+        }
+        if resolved_tid.is_none()
+            && let Ok(Some(found)) = client.find_by_imdb(imdb).await
+            && found > 0
+        {
+            resolved_tid = Some(found);
+            if let Some(store) = cache
+                && let Ok(bytes) = serde_json::to_vec(&found)
+            {
+                let _ = store.set(&map_key, &bytes, Some(7 * 86400));
+            }
+        }
+    }
+
+    let Some(tid) = resolved_tid else {
+        return (None, None, BTreeMap::new());
+    };
+    let Ok(data) = client.tv_with_externals(tid).await else {
+        return (Some(tid), None, BTreeMap::new());
+    };
+
+    let mut seasons_to_fetch: Vec<u64> = Vec::new();
+    for key in ["next_episode_to_air", "last_episode_to_air"] {
+        if let Some(s) = data[key]["season_number"].as_u64().filter(|&s| s > 0)
+            && !seasons_to_fetch.contains(&s)
+        {
+            seasons_to_fetch.push(s);
+        }
+    }
+    let mut season_set = tokio::task::JoinSet::new();
+    for season_no in seasons_to_fetch {
+        let client_clone = client.clone();
+        season_set.spawn(async move {
+            (season_no, client_clone.season(tid, season_no as u32).await.ok())
+        });
+    }
+
+    let mut tmdb_eps: BTreeMap<(u64, u64), Value> = BTreeMap::new();
+    while let Some(res) = season_set.join_next().await {
+        if let Ok((season_no, Some(season))) = res
+            && let Some(episodes) = season["episodes"].as_array()
+        {
+            for ep in episodes {
+                let Some(ep_no) = ep["episode_number"].as_u64() else {
+                    continue;
+                };
+                let s_no = ep["season_number"].as_u64().unwrap_or(season_no);
+                tmdb_eps.insert((s_no, ep_no), ep.clone());
+            }
+        }
+    }
+    if let Some(next_ep) = data["next_episode_to_air"].as_object()
+        && let (Some(s_no), Some(ep_no)) = (
+            next_ep.get("season_number").and_then(|v| v.as_u64()),
+            next_ep.get("episode_number").and_then(|v| v.as_u64()),
+        )
+    {
+        tmdb_eps
+            .entry((s_no, ep_no))
+            .or_insert_with(|| Value::Object(next_ep.clone()));
+    }
+
+    (Some(tid), Some(data), tmdb_eps)
+}
+
 async fn resolve_series_calendar_entries(
     tmdb_client: Option<&TmdbClient>,
     http: &reqwest::Client,
+    cache: Option<&CacheStore>,
     input: &CalendarSeriesInput,
-) -> Vec<Value> {
-    let mut imdb_id = input
+) -> (Vec<Value>, bool) {
+    let initial_imdb = input
         .imdb_id
         .as_deref()
         .or_else(|| input.id.starts_with("tt").then_some(input.id.as_str()))
         .map(str::trim)
         .filter(|s| s.starts_with("tt"))
         .map(str::to_string);
+    let initial_tmdb = input
+        .tmdb_id
+        .filter(|&v| v > 0)
+        .or_else(|| input.id.strip_prefix("tmdb:").and_then(|raw| raw.parse::<u64>().ok()));
+
+    let can_query_tvmaze_early = initial_imdb.is_some() || !input.name.trim().is_empty();
+    let tmdb_fut = async {
+        match tmdb_client {
+            Some(client) => {
+                fetch_tmdb_calendar_data(client, cache, initial_tmdb, initial_imdb.as_deref())
+                    .await
+            }
+            None => (initial_tmdb, None, BTreeMap::new()),
+        }
+    };
+    let tvmaze_early_fut = async {
+        if can_query_tvmaze_early {
+            fetch_tvmaze_show_with_episodes(http, initial_imdb.as_deref(), None, &input.name).await
+        } else {
+            None
+        }
+    };
+    let ((tmdb_id, tmdb_data, tmdb_eps), early_tvmaze) = tokio::join!(tmdb_fut, tvmaze_early_fut);
+
+    let mut imdb_id = initial_imdb.clone();
     let mut tvdb_id: Option<u64> = None;
     let mut show_name = input.name.clone();
     let mut poster: Option<String> = input.poster.clone().filter(|s| !s.is_empty());
     let mut backdrop: Option<String> = None;
     let mut tmdb_network: Option<String> = None;
+    let mut is_ended = false;
 
-    // Collect TMDB episodes by (season, episode) when TMDB is available.
-    let mut tmdb_eps: BTreeMap<(u64, u64), Value> = BTreeMap::new();
-    let mut tmdb_id = input.tmdb_id.filter(|&v| v > 0);
-    if tmdb_id.is_none()
-        && let Some(raw) = input.id.strip_prefix("tmdb:")
-    {
-        tmdb_id = raw.parse::<u64>().ok();
-    }
-
-    if let (Some(client), Some(tid)) = (tmdb_client, tmdb_id)
-        && let Ok(data) = client.tv_with_externals(tid).await
-    {
+    if let Some(ref data) = tmdb_data {
         if imdb_id.is_none() {
             imdb_id = data["external_ids"]["imdb_id"]
                 .as_str()
@@ -1002,48 +1112,22 @@ async fn resolve_series_calendar_entries(
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-
-        let mut seasons_to_fetch: Vec<u64> = Vec::new();
-        for key in ["next_episode_to_air", "last_episode_to_air"] {
-            if let Some(s) = data[key]["season_number"].as_u64().filter(|&s| s > 0)
-                && !seasons_to_fetch.contains(&s)
-            {
-                seasons_to_fetch.push(s);
-            }
-        }
-        for season_no in seasons_to_fetch {
-            if let Ok(season) = client.season(tid, season_no as u32).await
-                && let Some(episodes) = season["episodes"].as_array()
-            {
-                for ep in episodes {
-                    let Some(ep_no) = ep["episode_number"].as_u64() else {
-                        continue;
-                    };
-                    let s_no = ep["season_number"].as_u64().unwrap_or(season_no);
-                    tmdb_eps.insert((s_no, ep_no), ep.clone());
-                }
-            }
-        }
-        if let Some(next_ep) = data["next_episode_to_air"].as_object()
-            && let (Some(s_no), Some(ep_no)) = (
-                next_ep.get("season_number").and_then(|v| v.as_u64()),
-                next_ep.get("episode_number").and_then(|v| v.as_u64()),
-            )
-        {
-            tmdb_eps
-                .entry((s_no, ep_no))
-                .or_insert_with(|| Value::Object(next_ep.clone()));
-        }
+        is_ended = matches!(
+            data["status"].as_str().map(str::trim),
+            Some("Ended" | "Canceled")
+        );
     }
 
-    // Fetch TVMaze official streaming/broadcast schedule (no API key needed).
-    let tvmaze = fetch_tvmaze_show_with_episodes(
-        http,
-        imdb_id.as_deref(),
-        tvdb_id,
-        &show_name,
-    )
-    .await;
+    // Fallback to TVMaze if earlier lookup was skipped (`tmdb:...` id with empty name) or lacked IDs.
+    let tvmaze = if early_tvmaze.is_some() {
+        early_tvmaze
+    } else if !can_query_tvmaze_early
+        || (initial_imdb.is_none() && (imdb_id.is_some() || tvdb_id.is_some()))
+    {
+        fetch_tvmaze_show_with_episodes(http, imdb_id.as_deref(), tvdb_id, &show_name).await
+    } else {
+        None
+    };
 
     let mut web_channel: Option<String> = None;
     let mut tv_network: Option<String> = tmdb_network;
@@ -1051,6 +1135,9 @@ async fn resolve_series_calendar_entries(
     let mut tvmaze_eps: BTreeMap<(u64, u64), Value> = BTreeMap::new();
 
     if let Some(ref show) = tvmaze {
+        if show["status"].as_str() == Some("Ended") {
+            is_ended = true;
+        }
         if show_name.is_empty()
             && let Some(n) = show["name"].as_str().map(str::trim).filter(|s| !s.is_empty())
         {
@@ -1197,7 +1284,7 @@ async fn resolve_series_calendar_entries(
             }
         }
     }
-    out
+    (out, is_ended)
 }
 
 /// Official release calendar for library series, reconciling streaming platforms (TVMaze)
@@ -1210,7 +1297,8 @@ pub async fn calendar_episodes(
     from: Option<String>,
     force: Option<bool>,
 ) -> Result<Vec<Value>, String> {
-    const CALENDAR_SERIES_CACHE_TTL_SECS: u64 = 3 * 3600;
+    const CALENDAR_ACTIVE_CACHE_TTL_SECS: u64 = 6 * 3600;
+    const CALENDAR_ENDED_CACHE_TTL_SECS: u64 = 24 * 3600;
     let s = crate::load_settings_inner(&state.kv);
     let tmdb_client = if s.services.tmdb_enabled && !s.tmdb_api_key.trim().is_empty() {
         TmdbClient::new(s.tmdb_api_key, s.services.tmdb_language).ok()
@@ -1241,7 +1329,7 @@ pub async fn calendar_episodes(
         let tmdb_active = tmdb_client.is_some();
         tasks.spawn(async move {
             let cache_key = format!(
-                "calendar_series_v2:{}:{}:{}",
+                "calendar_series_v3:{}:{}:{}",
                 input.id,
                 input.tmdb_id.unwrap_or(0),
                 tmdb_active
@@ -1252,18 +1340,28 @@ pub async fn calendar_episodes(
             {
                 return cached;
             }
-            let resolved =
-                resolve_series_calendar_entries(tmdb_client.as_ref(), &http, &input).await;
+            let (resolved, is_ended) = resolve_series_calendar_entries(
+                tmdb_client.as_ref(),
+                &http,
+                Some(&cache),
+                &input,
+            )
+            .await;
             if !resolved.is_empty()
                 && let Ok(bytes) = serde_json::to_vec(&resolved)
             {
-                let _ = cache.set(&cache_key, &bytes, Some(CALENDAR_SERIES_CACHE_TTL_SECS));
+                let ttl = if is_ended {
+                    CALENDAR_ENDED_CACHE_TTL_SECS
+                } else {
+                    CALENDAR_ACTIVE_CACHE_TTL_SECS
+                };
+                let _ = cache.set(&cache_key, &bytes, Some(ttl));
             }
             resolved
         });
     };
 
-    for _ in 0..8 {
+    for _ in 0..12 {
         match pending.next() {
             Some(item) => spawn(&mut tasks, item),
             None => break,

@@ -10,7 +10,9 @@ use tokio::net::{UdpSocket, lookup_host};
 use tokio::sync::Notify;
 
 const CACHE_TTL: Duration = Duration::from_secs(300);
-const QUERY_TIMEOUT: Duration = Duration::from_secs(4);
+const FALLBACK_CACHE_TTL: Duration = Duration::from_secs(120);
+const PROVIDER_BACKOFF_TTL: Duration = Duration::from_secs(120);
+const QUERY_TIMEOUT: Duration = Duration::from_millis(1500);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsConfig {
@@ -38,6 +40,8 @@ static CACHE: LazyLock<RwLock<HashMap<String, CachedAddrs>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 static IN_FLIGHT: LazyLock<Mutex<HashMap<String, Arc<Notify>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static DEGRADED_PROVIDER: LazyLock<Mutex<Option<(String, Instant)>>> =
+    LazyLock::new(|| Mutex::new(None));
 static RESOLVER: LazyLock<Arc<NuvioDnsResolver>> =
     LazyLock::new(|| Arc::new(NuvioDnsResolver));
 
@@ -84,6 +88,7 @@ pub fn configure(mode: &str, custom: &str) {
         cfg.mode = norm_mode;
         cfg.custom = norm_custom;
         CACHE.write().expect("dns cache lock").clear();
+        *DEGRADED_PROVIDER.lock().expect("dns degraded lock") = None;
     }
 }
 
@@ -157,24 +162,48 @@ async fn resolve_host_ips(
 
         match role {
             Ok(_guard) => {
-                let resolved = match cfg.mode.as_str() {
-                    "google" => doh_or_udp("https://dns.google/dns-query", IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), clean).await,
-                    "quad9" => doh_or_udp("https://dns.quad9.net/dns-query", IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), clean).await,
-                    "adguard" => doh_or_udp("https://dns.adguard-dns.com/dns-query", IpAddr::V4(Ipv4Addr::new(94, 140, 14, 14)), clean).await,
-                    "custom" => resolve_custom(&cfg.custom, clean).await,
-                    _ => doh_or_udp("https://1.1.1.1/dns-query", IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), clean).await,
+                let provider_key = format!("{}|{}", cfg.mode, cfg.custom);
+                let provider_degraded = {
+                    let guard = DEGRADED_PROVIDER.lock().expect("dns degraded lock");
+                    guard
+                        .as_ref()
+                        .is_some_and(|(k, until)| k == &provider_key && Instant::now() < *until)
                 };
 
-                let ips = match resolved {
-                    Ok(list) if !list.is_empty() => list,
-                    _ => return system_lookup(clean).await,
+                let resolved = if provider_degraded {
+                    Err(())
+                } else {
+                    let lookup = async {
+                        match cfg.mode.as_str() {
+                            "google" => doh_or_udp("https://dns.google/dns-query", IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), clean).await,
+                            "quad9" => doh_or_udp("https://dns.quad9.net/dns-query", IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), clean).await,
+                            "adguard" => doh_or_udp("https://dns.adguard-dns.com/dns-query", IpAddr::V4(Ipv4Addr::new(94, 140, 14, 14)), clean).await,
+                            "custom" => resolve_custom(&cfg.custom, clean).await,
+                            _ => doh_or_udp("https://1.1.1.1/dns-query", IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), clean).await,
+                        }
+                    };
+                    tokio::time::timeout(Duration::from_millis(2200), lookup)
+                        .await
+                        .unwrap_or(Err(()))
+                };
+
+                let (ips, ttl) = match resolved {
+                    Ok(list) if !list.is_empty() => (list, CACHE_TTL),
+                    _ => {
+                        if !provider_degraded {
+                            *DEGRADED_PROVIDER.lock().expect("dns degraded lock") =
+                                Some((provider_key, Instant::now() + PROVIDER_BACKOFF_TTL));
+                        }
+                        let sys = system_lookup(clean).await?;
+                        (sys, FALLBACK_CACHE_TTL)
+                    }
                 };
 
                 CACHE.write().expect("dns cache lock").insert(
                     cache_key,
                     CachedAddrs {
                         ips: ips.clone(),
-                        expires_at: Instant::now() + CACHE_TTL,
+                        expires_at: Instant::now() + ttl,
                     },
                 );
                 return Ok(ips);

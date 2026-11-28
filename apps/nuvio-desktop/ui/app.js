@@ -803,7 +803,9 @@ async function enterMainApp(status) {
     profileSyncTask,
     simklTask,
     refreshWatchedKeys(),
-    refreshLibraryState(),
+    refreshLibraryState().then(() => {
+      preloadLibraryCalendar();
+    }),
     refreshContinueWatching(),
   ]);
   setTimeout(() => {
@@ -6386,7 +6388,7 @@ document.querySelectorAll('[data-library-tab]').forEach((btn) => {
 });
 
 // --- LIBRARY CALENDAR (Desktop-first release planner) ---
-const LIBRARY_CALENDAR_CACHE_KEY = 'nuvio-library-calendar-v5';
+const LIBRARY_CALENDAR_CACHE_KEY = 'nuvio-library-calendar-v6';
 const LIBRARY_CALENDAR_TTL_MS = 3 * 60 * 60 * 1000;
 const LIBRARY_CALENDAR_MAX_SERIES = 120;
 const LIBRARY_CALENDAR_LOOKBACK_DAYS = 7;
@@ -6396,6 +6398,8 @@ const LIBRARY_CALENDAR_MONTHS_SHORT = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun',
 const LIBRARY_CALENDAR_WEEKDAYS = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
 const LIBRARY_CALENDAR_WEEKDAYS_SHORT = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'];
 let libraryCalendarLoading = false;
+let libraryCalendarPromise = null;
+let libraryCalendarPromiseSig = '';
 const libraryCalendarState = { rows: [], month: null, selected: null, view: 'month', scope: 'all', query: '' };
 const CALENDAR_CHEVRON_LEFT = '<svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M15.41 16.59 14 18l-6-6 6-6 1.41 1.41L10.83 12z"/></svg>';
 const CALENDAR_CHEVRON_RIGHT = '<svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M8.59 16.59 10 18l6-6-6-6-1.41 1.41L13.17 12z"/></svg>';
@@ -6485,11 +6489,9 @@ function calendarReleaseLabel(row) {
   return row.episodeTitle ? `${code} · ${row.episodeTitle}` : code;
 }
 
-async function resolveCalendarTmdbIds(series, stored, onProgress) {
+function collectHintedCalendarTmdbIds(series, stored) {
   const ids = {};
-  const pending = [];
   for (const item of series) {
-    // Ids já em formato TMDB evitam uma chamada de metadados ao addon.
     const inline = /^tmdb:(\d+)$/.exec(item.id);
     if (inline) {
       ids[item.id] = Number(inline[1]);
@@ -6497,23 +6499,61 @@ async function resolveCalendarTmdbIds(series, stored, onProgress) {
     }
     const cached = Number(stored?.[item.id]);
     if (cached > 0) ids[item.id] = cached;
-    else pending.push(item);
   }
-  let done = 0;
-  const queue = [...pending];
-  const worker = async () => {
-    while (queue.length) {
-      const item = queue.shift();
-      const meta = await fetchMetaDetailsCached('series', item.id).catch(() => null);
-      const tmdb = Number(meta?.tmdb_id ?? meta?.moviedb_id ?? 0);
-      if (tmdb > 0) ids[item.id] = tmdb;
-      done += 1;
-      onProgress(done, pending.length);
-    }
-  };
-  const workers = Math.min(6, Math.max(queue.length, 1));
-  await Promise.all(Array.from({ length: workers }, worker));
   return ids;
+}
+
+function renderLibraryCalendarStateCard(wrap, message, showRetry = true) {
+  if (!wrap) return;
+  wrap.innerHTML = `
+    <div class="library-calendar-shell is-desktop-cal cal-state-card">
+      <div class="cal-state-body">
+        <h3 class="calendar-month">Calendário de estreias</h3>
+        <p class="cal-state-msg">${esc(message)}</p>
+        ${showRetry ? '<button type="button" class="calendar-today-btn" data-calendar-refresh>Atualizar calendário</button>' : ''}
+      </div>
+    </div>`;
+  wrap.querySelector('[data-calendar-refresh]')?.addEventListener('click', () => {
+    loadLibraryCalendar(true);
+  });
+}
+
+function renderLibraryCalendarSkeleton(wrap, seriesCount) {
+  if (!wrap) return;
+  const now = new Date();
+  const skeletonCells = Array.from({ length: 35 }, () => '<span class="calendar-cell cal-skeleton-cell"></span>').join('');
+  wrap.innerHTML = `
+    <div class="library-calendar-shell is-desktop-cal is-loading">
+      <div class="cal-desktop-toolbar">
+        <div class="cal-toolbar-left">
+          <h3 class="calendar-month">${esc(calendarMonthTitle(calendarStartOfMonth(now)))}</h3>
+          <div class="cal-stats-row">
+            <span class="cal-stat-pill is-highlight">Carregando ${seriesCount} ${seriesCount === 1 ? 'série' : 'séries'} em paralelo…</span>
+          </div>
+        </div>
+      </div>
+      <div class="cal-month-split">
+        <section class="calendar-main">
+          <div class="calendar-weekdays">
+            ${LIBRARY_CALENDAR_WEEKDAYS.map((label) => `<span class="calendar-weekday">${label}</span>`).join('')}
+          </div>
+          <div class="calendar-grid">${skeletonCells}</div>
+        </section>
+        <aside class="calendar-agenda">
+          <div class="calendar-agenda-head">
+            <div>
+              <h3 class="calendar-agenda-title">Sincronizando datas oficiais…</h3>
+              <span class="calendar-agenda-date">Buscando TMDB e TVMaze simultaneamente</span>
+            </div>
+          </div>
+          <div class="cal-skeleton-list">
+            <div class="cal-skeleton-row"></div>
+            <div class="cal-skeleton-row"></div>
+            <div class="cal-skeleton-row"></div>
+          </div>
+        </aside>
+      </div>
+    </div>`;
 }
 
 function buildLibraryCalendarRows(items, tmdbIds) {
@@ -6573,7 +6613,7 @@ function renderLibraryCalendar(items, tmdbIds) {
   if (!wrap) return;
   libraryCalendarState.rows = buildLibraryCalendarRows(items, tmdbIds);
   if (!libraryCalendarState.rows.length) {
-    wrap.innerHTML = '';
+    renderLibraryCalendarStateCard(wrap, 'Sem estreias anunciadas no período atual para as séries da biblioteca.');
     return;
   }
   const today = new Date();
@@ -6952,63 +6992,120 @@ function drawLibraryCalendar() {
   });
 }
 
-async function loadLibraryCalendar(force = false) {
+async function loadLibraryCalendar(force = false, opts = {}) {
+  const background = Boolean(opts?.background);
   const wrap = document.getElementById('library-calendar');
   const status = document.getElementById('library-calendar-status');
-  if (!wrap || libraryCalendarLoading) return;
   const series = librarySeriesForCalendar();
   if (!series.length) {
-    wrap.innerHTML = '';
-    if (status) status.textContent = 'Ainda não há séries na biblioteca para o calendário.';
+    if (!background) {
+      renderLibraryCalendarStateCard(wrap, 'Ainda não há séries na biblioteca para o calendário.', false);
+      if (status) status.textContent = '';
+    }
     return;
   }
-  const signature = series.map((s) => s.id).join(',');
+
+  const limited = series.slice(0, LIBRARY_CALENDAR_MAX_SERIES);
+  const signature = limited.map((s) => s.id).join(',');
   const cached = readLibraryCalendarCache();
-  if (!force && cached?.signature === signature && Date.now() - Number(cached.at || 0) < LIBRARY_CALENDAR_TTL_MS) {
-    renderLibraryCalendar(cached.items, cached.tmdbIds);
-    if (status) status.textContent = '';
+  const cacheFresh = !force
+    && cached?.signature === signature
+    && Array.isArray(cached.items)
+    && Date.now() - Number(cached.at || 0) < LIBRARY_CALENDAR_TTL_MS
+    && (cached.items.length > 0 || cached.emptyOk === true);
+
+  if (cacheFresh) {
+    if (!background || librarySubTab === 'calendar') {
+      renderLibraryCalendar(cached.items, cached.tmdbIds);
+      if (status) status.textContent = '';
+    }
     return;
   }
+
+  if (!background && wrap && !wrap.querySelector('.cal-desktop-toolbar')) {
+    renderLibraryCalendarSkeleton(wrap, limited.length);
+    if (status) status.textContent = '';
+  }
+
+  // Se o pré-carregamento em paralelo com a biblioteca já estiver rodando, aguarda a mesma requisição.
+  if (libraryCalendarPromise && libraryCalendarPromiseSig === signature && !force) {
+    await libraryCalendarPromise;
+    if (!background || librarySubTab === 'calendar') {
+      const updated = readLibraryCalendarCache();
+      if (updated?.signature === signature && Array.isArray(updated.items)) {
+        renderLibraryCalendar(updated.items, updated.tmdbIds);
+      }
+      if (status) status.textContent = '';
+    }
+    return;
+  }
+
   libraryCalendarLoading = true;
-  try {
-    if (status) status.textContent = 'A preparar o calendário…';
-    const limited = series.slice(0, LIBRARY_CALENDAR_MAX_SERIES);
-    const tmdbEnabled = Boolean(appSettings?.services?.tmdb_enabled);
-    const tmdbIds = tmdbEnabled
-      ? await resolveCalendarTmdbIds(
-          limited,
-          cached?.tmdbIds,
-          (done, total) => {
-            if (status) status.textContent = `A identificar séries no TMDB… ${done}/${total}`;
-          },
-        )
-      : (cached?.tmdbIds || {});
-    if (status) status.textContent = 'A buscar datas oficiais de streaming e TV…';
+  libraryCalendarPromiseSig = signature;
+  const runPromise = (async () => {
+    const hintedIds = collectHintedCalendarTmdbIds(limited, cached?.tmdbIds);
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const lookback = new Date(today.getTime() - LIBRARY_CALENDAR_LOOKBACK_DAYS * 86400000);
     const seriesPayload = limited.map((s) => ({
       id: s.id,
       name: s.name,
-      tmdbId: Number(tmdbIds?.[s.id]) || null,
+      tmdbId: Number(hintedIds?.[s.id]) || null,
       imdbId: /^tt\d+$/i.test(s.id) ? s.id : null,
       poster: s.poster || null,
     }));
+
+    let failed = false;
     const items = (await invoke('calendar_episodes', {
       series: seriesPayload,
       from: calendarDayKey(lookback),
       force,
-    }).catch(() => [])) || [];
-    localStorage.setItem(LIBRARY_CALENDAR_CACHE_KEY, JSON.stringify({ signature, at: Date.now(), tmdbIds, items }));
-    renderLibraryCalendar(items, tmdbIds);
-    if (status) {
-      status.textContent = items.length
-        ? ''
-        : 'Sem estreias anunciadas para as séries da biblioteca.';
+    }).catch((err) => {
+      console.error('Falha ao carregar calendário:', err);
+      failed = true;
+      return [];
+    })) || [];
+
+    const tmdbIds = { ...hintedIds };
+    for (const it of items) {
+      const tid = Number(it?.tmdb_id);
+      if (it?.id && tid > 0) tmdbIds[String(it.id)] = tid;
     }
-  } finally {
-    libraryCalendarLoading = false;
-  }
+
+    if (!failed) {
+      try {
+        localStorage.setItem(LIBRARY_CALENDAR_CACHE_KEY, JSON.stringify({
+          signature,
+          at: Date.now(),
+          tmdbIds,
+          items,
+          emptyOk: items.length === 0,
+        }));
+      } catch {}
+    }
+
+    if (!background || librarySubTab === 'calendar') {
+      if (failed && !items.length) {
+        renderLibraryCalendarStateCard(wrap, 'Não foi possível carregar o calendário agora. Tente atualizar.');
+      } else {
+        renderLibraryCalendar(items, tmdbIds);
+      }
+      if (status) status.textContent = '';
+    }
+  })().finally(() => {
+    if (libraryCalendarPromise === runPromise) {
+      libraryCalendarPromise = null;
+      libraryCalendarLoading = false;
+    }
+  });
+
+  libraryCalendarPromise = runPromise;
+  await runPromise;
+}
+
+function preloadLibraryCalendar() {
+  if (!librarySeriesForCalendar().length) return;
+  loadLibraryCalendar(false, { background: true }).catch(() => {});
 }
 
 function toggleLibraryCalendar() {
@@ -7227,8 +7324,10 @@ async function refreshLibrary() {
   if (librarySubTab === 'saved' && status) {
     status.textContent = 'Sincronizando biblioteca…';
   }
+  preloadLibraryCalendar();
   await refreshLibraryState(true);
   renderFilteredLibrary();
+  preloadLibraryCalendar();
 }
 
 function libraryItemToCard(it) {

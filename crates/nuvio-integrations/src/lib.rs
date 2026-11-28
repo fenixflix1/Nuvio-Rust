@@ -30,8 +30,8 @@ pub fn shared_http_client() -> Result<reqwest::Client> {
     }
     let built = nuvio_storage::dns::client_builder()
         .user_agent("NuvioDesktop-Rust/0.1.0")
-        .connect_timeout(std::time::Duration::from_secs(4))
-        .timeout(std::time::Duration::from_secs(8))
+        .connect_timeout(std::time::Duration::from_secs(6))
+        .timeout(std::time::Duration::from_secs(10))
         .pool_max_idle_per_host(16)
         .tcp_nodelay(true)
         .build()?;
