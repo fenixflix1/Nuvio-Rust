@@ -53,6 +53,9 @@ jobs:
           if [ -f "$MANIFEST" ] && ! grep -q "usesCleartextTraffic" "$MANIFEST"; then
             sed -i 's/<application /<application android:usesCleartextTraffic="true" /' "$MANIFEST"
           fi
+          if [ -f "$MANIFEST" ] && ! grep -q "screenOrientation" "$MANIFEST"; then
+            sed -i 's/<activity /<activity android:screenOrientation="portrait" /' "$MANIFEST"
+          fi
 
       - name: Build Universal Android APK
         working-directory: apps/nuvio-desktop

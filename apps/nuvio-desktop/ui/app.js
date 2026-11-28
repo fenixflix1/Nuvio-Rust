@@ -8530,9 +8530,18 @@ document.getElementById('btn-update-install')?.addEventListener('click', async (
 
 // --- BOOT ---
 (async function boot() {
-  initNuvioChipDropdowns();
+  const bootFallbackTimer = setTimeout(() => {
+    if (!document.querySelector('.view.active')) {
+      showView('view-auth');
+    }
+  }, 1500);
+
   let status = null;
   try {
+    initNuvioChipDropdowns();
+    for (let i = 0; i < 40 && !window.__TAURI__?.core?.invoke; i += 1) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
     const [settings, authRes] = await Promise.all([
       invoke('load_settings'),
       invoke('get_auth_status'),
@@ -8547,10 +8556,17 @@ document.getElementById('btn-update-install')?.addEventListener('click', async (
     console.error('boot failed', e);
   }
 
-  if (status && (status.signed_in || status.is_guest)) {
-    await enterMainApp(status);
-  } else {
+  try {
+    if (status && (status.signed_in || status.is_guest)) {
+      await enterMainApp(status);
+    } else {
+      showView('view-auth');
+    }
+  } catch (e) {
+    console.error('enterMainApp failed', e);
     showView('view-auth');
+  } finally {
+    clearTimeout(bootFallbackTimer);
   }
 
   if (!updateBootChecked) {

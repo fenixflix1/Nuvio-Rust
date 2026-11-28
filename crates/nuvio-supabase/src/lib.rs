@@ -165,7 +165,9 @@ pub async fn discover_nuvio_server(server_input: &str) -> Result<DiscoveryDocume
     url.set_path(&discovery_path);
     url.set_query(None);
 
-    let client = nuvio_storage::dns::client_builder().build()?;
+    let client = nuvio_storage::dns::client_builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()?;
     let resp = client.get(url).send().await?;
     let status = resp.status();
     let body = resp.text().await?;

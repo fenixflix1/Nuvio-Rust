@@ -27,7 +27,7 @@ jobs:
           cp apps/nuvio-desktop/icons/icon.png AppDir/usr/share/icons/hicolor/256x256/apps/nuvio-desktop.png
           cat > AppDir/nuvio-desktop.desktop <<'EOF'
           [Desktop Entry]
-          Name=Nuvio Desktop
+          Name=Nuvio
           Exec=nuvio-desktop
           Icon=nuvio-desktop
           Type=Application

@@ -449,16 +449,41 @@ async fn get_auth_status(state: State<'_, AppState>) -> Result<AuthStatusRespons
     let cached_profiles = load_profiles_inner(&state.kv);
     let saved_session = load_session_inner(&state.kv);
 
-    let (client, server) = match ensure_supabase_client(&state).await {
-        Ok((c, s)) => (Some(c), Some(s)),
-        Err(_) => (None, load_server_config_inner(&state.kv)),
+    if saved_session.is_none() {
+        return Ok(AuthStatusResponse {
+            signed_in: false,
+            is_guest,
+            email: None,
+            user_id: None,
+            server: load_server_config_inner(&state.kv),
+            profiles: if is_guest && cached_profiles.is_empty() {
+                vec![default_guest_profile()]
+            } else {
+                cached_profiles
+            },
+            active_profile_index,
+        });
+    }
+
+    let (client, server) = match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        ensure_supabase_client(&state),
+    )
+    .await
+    {
+        Ok(Ok((c, s))) => (Some(c), Some(s)),
+        _ => (None, load_server_config_inner(&state.kv)),
     };
 
-    if let (Some(c), Some(sess)) = (client, saved_session) {
-        let active_sess = if let Some(cur) = c.current_session() {
-            cur
+    if let Some(sess) = saved_session {
+        let active_sess = if let Some(c) = client {
+            if let Some(cur) = c.current_session() {
+                cur
+            } else {
+                c.import_session(sess.clone());
+                sess
+            }
         } else {
-            c.import_session(sess.clone());
             sess
         };
         let user = active_sess.user.clone();
