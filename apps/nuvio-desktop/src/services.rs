@@ -1,7 +1,8 @@
-use nuvio_core::integrations::{mdblist::MdbListClient, tmdb::TmdbClient};
+use nuvio_core::integrations::{mdblist::MdbListClient, shared_http_client, tmdb::TmdbClient};
 use nuvio_core::plugins::resolve_imdb_to_tmdb;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -766,6 +767,536 @@ pub async fn tmdb_season_episodes(
     }))).collect())
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarSeriesInput {
+    pub id: String,
+    pub name: String,
+    pub tmdb_id: Option<u64>,
+    pub imdb_id: Option<String>,
+    pub poster: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReconciledDates {
+    primary: String,
+    streaming_date: Option<String>,
+    tv_date: Option<String>,
+}
+
+fn parse_ymd_days(date_str: &str) -> Option<i64> {
+    let raw = date_str.trim().get(..10)?;
+    let mut parts = raw.split('-');
+    let y: i64 = parts.next()?.parse().ok()?;
+    let m: i64 = parts.next()?.parse().ok()?;
+    let d: i64 = parts.next()?.parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y_adj = y - i64::from(m <= 2);
+    let era = y_adj.div_euclid(400);
+    let yoe = y_adj.rem_euclid(400);
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
+}
+
+fn reconcile_episode_dates(
+    tmdb_date: Option<&str>,
+    tvmaze_date: Option<&str>,
+    has_web_channel: bool,
+    has_network: bool,
+) -> Option<ReconciledDates> {
+    let td = tmdb_date.map(str::trim).filter(|s| s.len() >= 10).map(|s| &s[..10]);
+    let md = tvmaze_date.map(str::trim).filter(|s| s.len() >= 10).map(|s| &s[..10]);
+    match (td, md) {
+        (Some(td), Some(md)) => {
+            if td == md {
+                return Some(ReconciledDates {
+                    primary: md.to_string(),
+                    streaming_date: has_web_channel.then(|| md.to_string()),
+                    tv_date: has_network.then(|| md.to_string()),
+                });
+            }
+            let diff = parse_ymd_days(td)
+                .zip(parse_ymd_days(md))
+                .map(|(a, b)| (a - b).abs())
+                .unwrap_or(999);
+            if diff <= 14 {
+                if has_web_channel {
+                    if md < td {
+                        // Streaming drops earlier than linear TV (e.g. Paramount+ Friday vs Showtime Sunday).
+                        return Some(ReconciledDates {
+                            primary: md.to_string(),
+                            streaming_date: Some(md.to_string()),
+                            tv_date: Some(td.to_string()),
+                        });
+                    }
+                    return Some(ReconciledDates {
+                        primary: td.to_string(),
+                        streaming_date: Some(td.to_string()),
+                        tv_date: Some(md.to_string()),
+                    });
+                }
+                if td < md {
+                    return Some(ReconciledDates {
+                        primary: td.to_string(),
+                        streaming_date: Some(td.to_string()),
+                        tv_date: Some(md.to_string()),
+                    });
+                }
+                return Some(ReconciledDates {
+                    primary: md.to_string(),
+                    streaming_date: None,
+                    tv_date: has_network.then(|| md.to_string()),
+                });
+            }
+            let primary = if has_web_channel { md } else { td };
+            Some(ReconciledDates {
+                primary: primary.to_string(),
+                streaming_date: has_web_channel.then(|| md.to_string()),
+                tv_date: if has_network || td != md {
+                    Some(td.to_string())
+                } else {
+                    None
+                },
+            })
+        }
+        (None, Some(md)) => Some(ReconciledDates {
+            primary: md.to_string(),
+            streaming_date: has_web_channel.then(|| md.to_string()),
+            tv_date: has_network.then(|| md.to_string()),
+        }),
+        (Some(td), None) => Some(ReconciledDates {
+            primary: td.to_string(),
+            streaming_date: None,
+            tv_date: Some(td.to_string()),
+        }),
+        (None, None) => None,
+    }
+}
+
+fn strip_html_tags(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut in_tag = false;
+    for ch in raw.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn url_encode_query(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
+
+async fn fetch_tvmaze_show_with_episodes(
+    http: &reqwest::Client,
+    imdb_id: Option<&str>,
+    tvdb_id: Option<u64>,
+    name: &str,
+) -> Option<Value> {
+    let mut resolved_id = if let Some(imdb) = imdb_id.filter(|s| s.starts_with("tt")) {
+        let url = format!("https://api.tvmaze.com/lookup/shows?imdb={imdb}");
+        if let Ok(resp) = http.get(url).send().await
+            && resp.status().is_success()
+            && let Ok(val) = resp.json::<Value>().await
+        {
+            val["id"].as_u64()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if resolved_id.is_none()
+        && let Some(tvdb) = tvdb_id.filter(|&v| v > 0)
+    {
+        let url = format!("https://api.tvmaze.com/lookup/shows?thetvdb={tvdb}");
+        if let Ok(resp) = http.get(url).send().await
+            && resp.status().is_success()
+            && let Ok(val) = resp.json::<Value>().await
+        {
+            resolved_id = val["id"].as_u64();
+        }
+    }
+
+    if let Some(show_id) = resolved_id {
+        let url = format!("https://api.tvmaze.com/shows/{show_id}?embed=episodes");
+        if let Ok(resp) = http.get(url).send().await
+            && resp.status().is_success()
+            && let Ok(val) = resp.json::<Value>().await
+        {
+            return Some(val);
+        }
+    }
+
+    let trimmed = name.trim();
+    if !trimmed.is_empty() {
+        let url = format!(
+            "https://api.tvmaze.com/singlesearch/shows?q={}&embed=episodes",
+            url_encode_query(trimmed)
+        );
+        if let Ok(resp) = http.get(url).send().await
+            && resp.status().is_success()
+            && let Ok(val) = resp.json::<Value>().await
+        {
+            return Some(val);
+        }
+    }
+    None
+}
+
+async fn resolve_series_calendar_entries(
+    tmdb_client: Option<&TmdbClient>,
+    http: &reqwest::Client,
+    input: &CalendarSeriesInput,
+) -> Vec<Value> {
+    let mut imdb_id = input
+        .imdb_id
+        .as_deref()
+        .or_else(|| input.id.starts_with("tt").then_some(input.id.as_str()))
+        .map(str::trim)
+        .filter(|s| s.starts_with("tt"))
+        .map(str::to_string);
+    let mut tvdb_id: Option<u64> = None;
+    let mut show_name = input.name.clone();
+    let mut poster: Option<String> = input.poster.clone().filter(|s| !s.is_empty());
+    let mut backdrop: Option<String> = None;
+    let mut tmdb_network: Option<String> = None;
+
+    // Collect TMDB episodes by (season, episode) when TMDB is available.
+    let mut tmdb_eps: BTreeMap<(u64, u64), Value> = BTreeMap::new();
+    let mut tmdb_id = input.tmdb_id.filter(|&v| v > 0);
+    if tmdb_id.is_none()
+        && let Some(raw) = input.id.strip_prefix("tmdb:")
+    {
+        tmdb_id = raw.parse::<u64>().ok();
+    }
+
+    if let (Some(client), Some(tid)) = (tmdb_client, tmdb_id)
+        && let Ok(data) = client.tv_with_externals(tid).await
+    {
+        if imdb_id.is_none() {
+            imdb_id = data["external_ids"]["imdb_id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| s.starts_with("tt"))
+                .map(str::to_string);
+        }
+        tvdb_id = data["external_ids"]["tvdb_id"].as_u64();
+        if let Some(n) = data["name"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            show_name = n.to_string();
+        }
+        if let Some(p) = image(&data["poster_path"], "w342") {
+            poster = Some(p);
+        }
+        backdrop = image(&data["backdrop_path"], "w780");
+        tmdb_network = data["networks"][0]["name"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
+        let mut seasons_to_fetch: Vec<u64> = Vec::new();
+        for key in ["next_episode_to_air", "last_episode_to_air"] {
+            if let Some(s) = data[key]["season_number"].as_u64().filter(|&s| s > 0)
+                && !seasons_to_fetch.contains(&s)
+            {
+                seasons_to_fetch.push(s);
+            }
+        }
+        for season_no in seasons_to_fetch {
+            if let Ok(season) = client.season(tid, season_no as u32).await
+                && let Some(episodes) = season["episodes"].as_array()
+            {
+                for ep in episodes {
+                    let Some(ep_no) = ep["episode_number"].as_u64() else {
+                        continue;
+                    };
+                    let s_no = ep["season_number"].as_u64().unwrap_or(season_no);
+                    tmdb_eps.insert((s_no, ep_no), ep.clone());
+                }
+            }
+        }
+        if let Some(next_ep) = data["next_episode_to_air"].as_object()
+            && let (Some(s_no), Some(ep_no)) = (
+                next_ep.get("season_number").and_then(|v| v.as_u64()),
+                next_ep.get("episode_number").and_then(|v| v.as_u64()),
+            )
+        {
+            tmdb_eps
+                .entry((s_no, ep_no))
+                .or_insert_with(|| Value::Object(next_ep.clone()));
+        }
+    }
+
+    // Fetch TVMaze official streaming/broadcast schedule (no API key needed).
+    let tvmaze = fetch_tvmaze_show_with_episodes(
+        http,
+        imdb_id.as_deref(),
+        tvdb_id,
+        &show_name,
+    )
+    .await;
+
+    let mut web_channel: Option<String> = None;
+    let mut tv_network: Option<String> = tmdb_network;
+    let mut schedule_days: Vec<String> = Vec::new();
+    let mut tvmaze_eps: BTreeMap<(u64, u64), Value> = BTreeMap::new();
+
+    if let Some(ref show) = tvmaze {
+        if show_name.is_empty()
+            && let Some(n) = show["name"].as_str().map(str::trim).filter(|s| !s.is_empty())
+        {
+            show_name = n.to_string();
+        }
+        if poster.is_none() {
+            poster = show["image"]["medium"]
+                .as_str()
+                .or_else(|| show["image"]["original"].as_str())
+                .map(str::to_string);
+        }
+        if imdb_id.is_none() {
+            imdb_id = show["externals"]["imdb"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| s.starts_with("tt"))
+                .map(str::to_string);
+        }
+        web_channel = show["webChannel"]["name"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if let Some(net) = show["network"]["name"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            tv_network = Some(net.to_string());
+        }
+        if let Some(days) = show["schedule"]["days"].as_array() {
+            schedule_days = days
+                .iter()
+                .filter_map(|d| d.as_str().map(str::trim).filter(|s| !s.is_empty()))
+                .map(str::to_string)
+                .collect();
+        }
+        if let Some(episodes) = show["_embedded"]["episodes"].as_array() {
+            for ep in episodes {
+                let Some(s_no) = ep["season"].as_u64() else {
+                    continue;
+                };
+                let Some(ep_no) = ep["number"].as_u64() else {
+                    continue;
+                };
+                if s_no == 0 {
+                    continue;
+                }
+                tvmaze_eps.insert((s_no, ep_no), ep.clone());
+            }
+        }
+    }
+
+    let mut keys: BTreeMap<(u64, u64), ()> = BTreeMap::new();
+    for &k in tmdb_eps.keys() {
+        keys.insert(k, ());
+    }
+    for &k in tvmaze_eps.keys() {
+        keys.insert(k, ());
+    }
+
+    let has_web = web_channel.is_some();
+    let has_net = tv_network.is_some();
+    let mut out = Vec::new();
+    for (season_no, ep_no) in keys.keys().copied() {
+        let tm = tmdb_eps.get(&(season_no, ep_no));
+        let mz = tvmaze_eps.get(&(season_no, ep_no));
+        let tmdb_date = tm.and_then(|v| v["air_date"].as_str());
+        let tvmaze_date = mz.and_then(|v| v["airdate"].as_str());
+
+        let reconciled = reconcile_episode_dates(tmdb_date, tvmaze_date, has_web, has_net);
+        let title = tm
+            .and_then(|v| v["name"].as_str().map(str::trim).filter(|s| !s.is_empty()))
+            .or_else(|| mz.and_then(|v| v["name"].as_str().map(str::trim).filter(|s| !s.is_empty())))
+            .unwrap_or("")
+            .to_string();
+        let tmdb_overview = tm
+            .and_then(|v| v["overview"].as_str().map(str::trim).filter(|s| !s.is_empty()))
+            .map(str::to_string);
+        let overview = tmdb_overview.unwrap_or_else(|| {
+            mz.and_then(|v| v["summary"].as_str())
+                .map(strip_html_tags)
+                .unwrap_or_default()
+        });
+        let ep_thumb = tm
+            .and_then(|v| image(&v["still_path"], "w500"))
+            .or_else(|| {
+                mz.and_then(|v| {
+                    v["image"]["original"]
+                        .as_str()
+                        .or_else(|| v["image"]["medium"].as_str())
+                        .map(str::to_string)
+                })
+            });
+        let airstamp = mz
+            .and_then(|v| v["airstamp"].as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
+        match reconciled {
+            Some(rec) => {
+                out.push(json!({
+                    "id": &input.id,
+                    "tmdb_id": tmdb_id.unwrap_or(0),
+                    "imdb_id": &imdb_id,
+                    "name": &show_name,
+                    "season": season_no,
+                    "episode": ep_no,
+                    "title": title,
+                    "overview": overview,
+                    "released": rec.primary,
+                    "streaming_date": rec.streaming_date,
+                    "tv_date": rec.tv_date,
+                    "airstamp": airstamp,
+                    "platform": &web_channel,
+                    "network": &tv_network,
+                    "schedule_days": &schedule_days,
+                    "poster": &poster,
+                    "backdrop": ep_thumb.as_ref().or(backdrop.as_ref()),
+                }));
+            }
+            None => {
+                // Only emit undated episodes for the active/upcoming season from TMDB.
+                if tm.is_some() {
+                    out.push(json!({
+                        "id": &input.id,
+                        "tmdb_id": tmdb_id.unwrap_or(0),
+                        "imdb_id": &imdb_id,
+                        "name": &show_name,
+                        "season": season_no,
+                        "episode": ep_no,
+                        "title": title,
+                        "overview": overview,
+                        "released": "",
+                        "undated": true,
+                        "platform": &web_channel,
+                        "network": &tv_network,
+                        "schedule_days": &schedule_days,
+                        "poster": &poster,
+                        "backdrop": backdrop.as_ref(),
+                    }));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Official release calendar for library series, reconciling streaming platforms (TVMaze)
+/// with TV/localized metadata (TMDB) so hybrid releases (e.g. Paramount+ Friday vs Showtime Sunday)
+/// appear on their true official release day.
+#[tauri::command]
+pub async fn calendar_episodes(
+    state: tauri::State<'_, crate::AppState>,
+    series: Vec<CalendarSeriesInput>,
+    from: Option<String>,
+    force: Option<bool>,
+) -> Result<Vec<Value>, String> {
+    const CALENDAR_SERIES_CACHE_TTL_SECS: u64 = 3 * 3600;
+    let s = crate::load_settings_inner(&state.kv);
+    let tmdb_client = if s.services.tmdb_enabled && !s.tmdb_api_key.trim().is_empty() {
+        TmdbClient::new(s.tmdb_api_key, s.services.tmdb_language).ok()
+    } else {
+        None
+    };
+    let http = shared_http_client().map_err(|e| e.to_string())?;
+    let lower_bound = from.unwrap_or_default().trim().to_string();
+    let force = force.unwrap_or(false);
+
+    let mut unique: Vec<CalendarSeriesInput> = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
+    for item in series.into_iter().take(120) {
+        let key = item.id.trim().to_string();
+        if key.is_empty() || !seen_ids.insert(key) {
+            continue;
+        }
+        unique.push(item);
+    }
+
+    let mut pending = unique.into_iter();
+    let mut tasks: tokio::task::JoinSet<Vec<Value>> = tokio::task::JoinSet::new();
+    let cache = state.cache.clone();
+    let spawn = |tasks: &mut tokio::task::JoinSet<Vec<Value>>, input: CalendarSeriesInput| {
+        let tmdb_client = tmdb_client.clone();
+        let http = http.clone();
+        let cache = cache.clone();
+        let tmdb_active = tmdb_client.is_some();
+        tasks.spawn(async move {
+            let cache_key = format!(
+                "calendar_series_v2:{}:{}:{}",
+                input.id,
+                input.tmdb_id.unwrap_or(0),
+                tmdb_active
+            );
+            if !force
+                && let Ok(Some(raw)) = cache.get(&cache_key)
+                && let Ok(cached) = serde_json::from_slice::<Vec<Value>>(&raw)
+            {
+                return cached;
+            }
+            let resolved =
+                resolve_series_calendar_entries(tmdb_client.as_ref(), &http, &input).await;
+            if !resolved.is_empty()
+                && let Ok(bytes) = serde_json::to_vec(&resolved)
+            {
+                let _ = cache.set(&cache_key, &bytes, Some(CALENDAR_SERIES_CACHE_TTL_SECS));
+            }
+            resolved
+        });
+    };
+
+    for _ in 0..8 {
+        match pending.next() {
+            Some(item) => spawn(&mut tasks, item),
+            None => break,
+        }
+    }
+
+    let mut out = Vec::new();
+    while let Some(res) = tasks.join_next().await {
+        if let Ok(values) = res {
+            for ep in values {
+                let released = ep["released"].as_str().unwrap_or("");
+                let undated = ep["undated"].as_bool().unwrap_or(false);
+                if !undated && !lower_bound.is_empty() && released < lower_bound.as_str() {
+                    continue;
+                }
+                out.push(ep);
+            }
+        }
+        if let Some(item) = pending.next() {
+            spawn(&mut tasks, item);
+        }
+    }
+
+    out.sort_by(|a, b| {
+        calendar_sort_key(a)
+            .cmp(calendar_sort_key(b))
+            .then_with(|| a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or("")))
+            .then_with(|| a["season"].as_u64().cmp(&b["season"].as_u64()))
+            .then_with(|| a["episode"].as_u64().cmp(&b["episode"].as_u64()))
+    });
+    Ok(out)
+}
+
 /// Upcoming episodes of every library series, for the release calendar.
 ///
 /// `next_episode_to_air` only carries a single episode, so the season of that
@@ -1111,5 +1642,29 @@ mod tests {
         assert_eq!(arr[0]["release_info"], "2012");
         assert_eq!(arr[1]["name"], "Em Chamas");
         assert_eq!(arr[2]["name"], "A Esperança - Parte 1");
+    }
+
+    #[test]
+    fn reconciles_dexter_streaming_friday_over_linear_sunday() {
+        // Paramount+ drops Friday (2026-11-27), Showtime linear TV airs Sunday (2026-11-29).
+        let rec = reconcile_episode_dates(Some("2026-11-29"), Some("2026-11-27"), true, false)
+            .expect("reconciled");
+        assert_eq!(rec.primary, "2026-11-27");
+        assert_eq!(rec.streaming_date.as_deref(), Some("2026-11-27"));
+        assert_eq!(rec.tv_date.as_deref(), Some("2026-11-29"));
+
+        // Matching dates preserve platform vs network distinction.
+        let same = reconcile_episode_dates(Some("2026-12-04"), Some("2026-12-04"), true, true)
+            .expect("same");
+        assert_eq!(same.primary, "2026-12-04");
+        assert_eq!(same.streaming_date.as_deref(), Some("2026-12-04"));
+        assert_eq!(same.tv_date.as_deref(), Some("2026-12-04"));
+
+        // TVMaze-only fallback works when TMDB is disabled.
+        let mz_only = reconcile_episode_dates(None, Some("2026-12-11"), true, false)
+            .expect("tvmaze only");
+        assert_eq!(mz_only.primary, "2026-12-11");
+        assert_eq!(mz_only.streaming_date.as_deref(), Some("2026-12-11"));
+        assert_eq!(mz_only.tv_date, None);
     }
 }

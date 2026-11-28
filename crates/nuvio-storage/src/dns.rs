@@ -4,9 +4,10 @@ use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::net::{UdpSocket, lookup_host};
+use tokio::sync::Notify;
 
 const CACHE_TTL: Duration = Duration::from_secs(300);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(4);
@@ -35,8 +36,24 @@ struct CachedAddrs {
 static CONFIG: LazyLock<RwLock<DnsConfig>> = LazyLock::new(|| RwLock::new(DnsConfig::default()));
 static CACHE: LazyLock<RwLock<HashMap<String, CachedAddrs>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
+static IN_FLIGHT: LazyLock<Mutex<HashMap<String, Arc<Notify>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 static RESOLVER: LazyLock<Arc<NuvioDnsResolver>> =
     LazyLock::new(|| Arc::new(NuvioDnsResolver));
+
+struct InFlightGuard {
+    key: String,
+    notify: Arc<Notify>,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = IN_FLIGHT.lock() {
+            map.remove(&self.key);
+        }
+        self.notify.notify_waiters();
+    }
+}
 
 // Bootstrap clients use system/pinned endpoints without calling NuvioDnsResolver to avoid recursion.
 static BOOTSTRAP_PINNED: LazyLock<reqwest::Client> = LazyLock::new(|| {
@@ -116,34 +133,64 @@ async fn resolve_host_ips(
     }
 
     let cache_key = format!("{}|{}|{}", cfg.mode, cfg.custom, clean.to_ascii_lowercase());
-    if let Some(hit) = CACHE.read().expect("dns cache lock").get(&cache_key).cloned()
-        && Instant::now() < hit.expires_at
-        && !hit.ips.is_empty()
-    {
-        return Ok(hit.ips);
+    loop {
+        if let Some(hit) = CACHE.read().expect("dns cache lock").get(&cache_key).cloned()
+            && Instant::now() < hit.expires_at
+            && !hit.ips.is_empty()
+        {
+            return Ok(hit.ips);
+        }
+
+        let role: std::result::Result<InFlightGuard, Arc<Notify>> = {
+            let mut map = IN_FLIGHT.lock().expect("dns inflight lock");
+            if let Some(existing) = map.get(&cache_key) {
+                Err(Arc::clone(existing))
+            } else {
+                let notify = Arc::new(Notify::new());
+                map.insert(cache_key.clone(), Arc::clone(&notify));
+                Ok(InFlightGuard {
+                    key: cache_key.clone(),
+                    notify,
+                })
+            }
+        };
+
+        match role {
+            Ok(_guard) => {
+                let resolved = match cfg.mode.as_str() {
+                    "google" => doh_or_udp("https://dns.google/dns-query", IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), clean).await,
+                    "quad9" => doh_or_udp("https://dns.quad9.net/dns-query", IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), clean).await,
+                    "adguard" => doh_or_udp("https://dns.adguard-dns.com/dns-query", IpAddr::V4(Ipv4Addr::new(94, 140, 14, 14)), clean).await,
+                    "custom" => resolve_custom(&cfg.custom, clean).await,
+                    _ => doh_or_udp("https://1.1.1.1/dns-query", IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), clean).await,
+                };
+
+                let ips = match resolved {
+                    Ok(list) if !list.is_empty() => list,
+                    _ => return system_lookup(clean).await,
+                };
+
+                CACHE.write().expect("dns cache lock").insert(
+                    cache_key,
+                    CachedAddrs {
+                        ips: ips.clone(),
+                        expires_at: Instant::now() + CACHE_TTL,
+                    },
+                );
+                return Ok(ips);
+            }
+            Err(notify) => {
+                notify.notified().await;
+                if let Some(hit) = CACHE.read().expect("dns cache lock").get(&cache_key).cloned()
+                    && Instant::now() < hit.expires_at
+                    && !hit.ips.is_empty()
+                {
+                    return Ok(hit.ips);
+                }
+                return system_lookup(clean).await;
+            }
+        }
     }
-
-    let resolved = match cfg.mode.as_str() {
-        "google" => doh_or_udp("https://dns.google/dns-query", IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), clean).await,
-        "quad9" => doh_or_udp("https://dns.quad9.net/dns-query", IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), clean).await,
-        "adguard" => doh_or_udp("https://dns.adguard-dns.com/dns-query", IpAddr::V4(Ipv4Addr::new(94, 140, 14, 14)), clean).await,
-        "custom" => resolve_custom(&cfg.custom, clean).await,
-        _ => doh_or_udp("https://1.1.1.1/dns-query", IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), clean).await,
-    };
-
-    let ips = match resolved {
-        Ok(list) if !list.is_empty() => list,
-        _ => return system_lookup(clean).await,
-    };
-
-    CACHE.write().expect("dns cache lock").insert(
-        cache_key,
-        CachedAddrs {
-            ips: ips.clone(),
-            expires_at: Instant::now() + CACHE_TTL,
-        },
-    );
-    Ok(ips)
 }
 
 async fn resolve_custom(custom: &str, host: &str) -> std::result::Result<Vec<IpAddr>, ()> {

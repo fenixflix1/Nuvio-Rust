@@ -83,6 +83,12 @@ impl TmdbClient {
         self.get_resource(&format!("tv/{tmdb_id}"), "").await
     }
 
+    /// TV details with `external_ids` so calendar reconciliation can look up IMDb/TVDB on TVMaze.
+    pub async fn tv_with_externals(&self, tmdb_id: u64) -> Result<Value> {
+        self.get_resource(&format!("tv/{tmdb_id}"), "external_ids")
+            .await
+    }
+
     pub async fn season(&self, series: u64, season: u32) -> Result<Value> {
         self.get_resource(&format!("tv/{series}/season/{season}"), "")
             .await

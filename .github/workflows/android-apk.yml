@@ -1,0 +1,113 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build-android-apk:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang pkg-config libssl-dev
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform, build-tools and NDK
+        run: |
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;27.0.11902837"
+
+      - name: Set up Rust with Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Tauri CLI v2
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli@2
+
+      - name: Initialize Tauri Android project
+        working-directory: apps/nuvio-desktop
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.11902837
+        run: |
+          cargo tauri android init --ci
+          MANIFEST="gen/android/app/src/main/AndroidManifest.xml"
+          if [ -f "$MANIFEST" ] && ! grep -q "usesCleartextTraffic" "$MANIFEST"; then
+            sed -i 's/<application /<application android:usesCleartextTraffic="true" /' "$MANIFEST"
+          fi
+
+      - name: Build Universal Android APK
+        working-directory: apps/nuvio-desktop
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.11902837
+        run: |
+          cargo tauri android build --apk
+          mkdir -p ../../dist-apk/raw
+          RAW_UNI=$(find gen/android/app/build/outputs/apk -name "*.apk" | head -n 1)
+          test -n "$RAW_UNI"
+          cp "$RAW_UNI" ../../dist-apk/raw/universal.apk
+          rm -rf gen/android/app/build/outputs/apk
+
+      - name: Build aarch64-only Android APK
+        working-directory: apps/nuvio-desktop
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.11902837
+        run: |
+          cargo tauri android build --apk --target aarch64
+          RAW_ARM64=$(find gen/android/app/build/outputs/apk -name "*.apk" | head -n 1)
+          test -n "$RAW_ARM64"
+          cp "$RAW_ARM64" ../../dist-apk/raw/arm64.apk
+
+      - name: Align and sign APKs
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          ZIPALIGN="${ANDROID_HOME}/build-tools/34.0.0/zipalign"
+          APKSIGNER="${ANDROID_HOME}/build-tools/34.0.0/apksigner"
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > /tmp/release.keystore
+            KS="/tmp/release.keystore"
+            PASS="${KEYSTORE_PASS}"
+            ALIAS="${KEY_ALIAS:-nuvio}"
+          else
+            keytool -genkey -v -keystore /tmp/ci-debug.keystore -storepass android -alias nuvioci -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Nuvio,O=Nuvio,C=BR"
+            KS="/tmp/ci-debug.keystore"
+            PASS="android"
+            ALIAS="nuvioci"
+          fi
+          "$ZIPALIGN" -f 4 dist-apk/raw/universal.apk dist-apk/Nuvio-Android-universal.apk
+          "$APKSIGNER" sign --ks "$KS" --ks-pass "pass:${PASS}" --ks-key-alias "$ALIAS" dist-apk/Nuvio-Android-universal.apk
+          "$ZIPALIGN" -f 4 dist-apk/raw/arm64.apk dist-apk/Nuvio-Android-arm64.apk
+          "$APKSIGNER" sign --ks "$KS" --ks-pass "pass:${PASS}" --ks-key-alias "$ALIAS" dist-apk/Nuvio-Android-arm64.apk
+          rm -rf dist-apk/raw
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nuvio-Android-APKs
+          path: |
+            dist-apk/Nuvio-Android-universal.apk
+            dist-apk/Nuvio-Android-arm64.apk

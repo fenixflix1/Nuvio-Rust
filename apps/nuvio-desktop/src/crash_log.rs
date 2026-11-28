@@ -22,6 +22,12 @@ const PREVIOUS_LOG_FILE: &str = "crash.prev.log";
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
+static CUSTOM_LOG_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+#[allow(dead_code)]
+pub fn set_log_dir(dir: PathBuf) {
+    let _ = CUSTOM_LOG_DIR.set(dir);
+}
 
 thread_local! {
     /// A panic inside the hook itself (e.g. while resolving the path) must not
@@ -31,7 +37,15 @@ thread_local! {
 
 /// Absolute path of the crash log (`%LOCALAPPDATA%\Nuvio\crash.log` on Windows).
 pub fn path() -> PathBuf {
-    LOG_PATH.get_or_init(|| log_dir().join(LOG_FILE)).clone()
+    LOG_PATH
+        .get_or_init(|| {
+            CUSTOM_LOG_DIR
+                .get()
+                .cloned()
+                .unwrap_or_else(log_dir)
+                .join(LOG_FILE)
+        })
+        .clone()
 }
 
 fn log_dir() -> PathBuf {

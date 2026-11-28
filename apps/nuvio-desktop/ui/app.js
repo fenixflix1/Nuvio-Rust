@@ -91,7 +91,7 @@ mainViewportEl.addEventListener(
     }
 
     if (
-      activeTabName() === 'discover'
+      activeTabName() === 'search'
       && mainViewportEl.scrollTop + mainViewportEl.clientHeight >= mainViewportEl.scrollHeight - 260
     ) {
       maybeInfiniteDiscover();
@@ -1867,7 +1867,7 @@ function wireHorizontalShelfDrag(container) {
 }
 
 async function openFullCatalog(sec) {
-  activeCatalog = {
+  const catalogRef = {
     manifestUrl: sec.manifest_url,
     mediaType: sec.media_type,
     catalogId: sec.catalog_id,
@@ -1877,12 +1877,40 @@ async function openFullCatalog(sec) {
     searchQuery: sec.searchQuery || null,
     items: [...(sec.items || [])],
   };
+  activeCatalog = catalogRef;
   document.getElementById('catalog-page-title').textContent = sec.title;
   document.getElementById('catalog-page-sub').textContent = sec.addon_name;
   document.getElementById('catalog-full-status').textContent = '';
   setTab('catalog');
   renderFullCatalogGrid();
   document.getElementById('btn-catalog-load-more').classList.toggle('hidden', activeCatalog.items.length < 10);
+
+  if (!sec.sources && !sec.searchQuery && sec.manifest_url && (sec.items?.length || 0) >= 20) {
+    invoke('load_catalog_page', {
+      manifestUrl: sec.manifest_url,
+      mediaType: sec.media_type,
+      catalogId: sec.catalog_id,
+      skip: 0,
+      genre: sec.genre || null,
+      search: null,
+    }).then((fullPage) => {
+      if (activeCatalog !== catalogRef || !Array.isArray(fullPage) || fullPage.length <= catalogRef.items.length) return;
+      const seen = new Set(catalogRef.items.map((x) => `${x.type}:${x.id}`));
+      let added = false;
+      for (const item of fullPage) {
+        const k = `${item.type}:${item.id}`;
+        if (!seen.has(k)) {
+          seen.add(k);
+          catalogRef.items.push(item);
+          added = true;
+        }
+      }
+      if (added) {
+        renderFullCatalogGrid();
+        document.getElementById('btn-catalog-load-more').classList.toggle('hidden', catalogRef.items.length < 10);
+      }
+    }).catch(() => {});
+  }
 }
 
 function renderFullCatalogGrid() {
@@ -1998,7 +2026,7 @@ function applyHeroBackdrop(itemId, url) {
 }
 
 function prefetchHeroBackdrops() {
-  heroItems.forEach((item) => {
+  const fetchOne = (item) => {
     if (!item?.id || heroBackdropCache.has(item.id) || heroBackdropPending.has(item.id)) return;
     heroBackdropPending.add(item.id);
     fetchMetaDetailsCached(item.type, item.id)
@@ -2009,7 +2037,13 @@ function prefetchHeroBackdrops() {
       })
       .catch(() => heroBackdropCache.set(item.id, ''))
       .finally(() => heroBackdropPending.delete(item.id));
-  });
+  };
+  if (heroItems[0]) fetchOne(heroItems[0]);
+  if (heroItems.length > 1) {
+    setTimeout(() => {
+      heroItems.slice(1).forEach(fetchOne);
+    }, 350);
+  }
 }
 
 function renderHero() {
@@ -4334,7 +4368,129 @@ function getPlayerStageBounds() {
 }
 
 function normalizeLangCode(v) {
-  return String(v || '').trim().toLowerCase().replace(/_/g, '-');
+  return String(v || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+const LANG_FAMILY_ALIASES = {
+  pt: ['pt', 'por', 'pob', 'ptb', 'pt-br', 'ptbr', 'pt-pt', 'portugues', 'portuguese'],
+  en: ['en', 'eng', 'en-us', 'en-gb', 'english', 'ingles'],
+  ja: ['ja', 'jp', 'jpn', 'japanese', 'japones'],
+  es: ['es', 'spa', 'es-la', 'es-419', 'es-es', 'spanish', 'espanhol', 'espanol', 'latino', 'castellano'],
+  fr: ['fr', 'fre', 'fra', 'french', 'frances'],
+  de: ['de', 'ger', 'deu', 'german', 'alemao'],
+  it: ['it', 'ita', 'italian', 'italiano'],
+  ko: ['ko', 'kor', 'korean', 'coreano'],
+  zh: ['zh', 'zho', 'chi', 'zh-cn', 'zh-tw', 'chinese', 'chines'],
+  ru: ['ru', 'rus', 'russian', 'russo'],
+};
+
+const LANG_CODE_TO_FAMILY = new Map(
+  Object.entries(LANG_FAMILY_ALIASES).flatMap(([family, codes]) => codes.map((c) => [c, family]))
+);
+
+const PT_BR_TOKENS = new Set(['pt-br', 'ptbr', 'pob', 'ptb', 'brasil', 'brazil', 'brazilian', 'dublado', 'portugues-br', 'portuguese-br']);
+const PT_PT_TOKENS = new Set(['pt-pt', 'portugal', 'europeu', 'european', 'iberico']);
+
+function parseLangPreference(rawToken) {
+  const norm = normalizeLangCode(rawToken);
+  if (!norm || norm === 'und' || norm === 'unknown' || norm === '__unknown__') return null;
+  if (PT_BR_TOKENS.has(norm) || norm.includes('brasil') || norm.includes('brazil') || norm.includes('dublado')) {
+    return { token: norm, family: 'pt', variant: 'br' };
+  }
+  if (PT_PT_TOKENS.has(norm)) {
+    return { token: norm, family: 'pt', variant: 'pt' };
+  }
+  const family = LANG_CODE_TO_FAMILY.get(norm) || LANG_CODE_TO_FAMILY.get(norm.split('-')[0]) || norm.split('-')[0];
+  const variant = norm.includes('-') ? norm.split('-')[1] : '';
+  return { token: norm, family, variant };
+}
+
+function titleMatchesTokens(title, tokens) {
+  const clean = String(title || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  if (!clean) return false;
+  return tokens.some((tok) => {
+    const escaped = tok.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/-/g, '[-_\\s]*');
+    return new RegExp(`(?:^|[^a-z0-9])${escaped}(?:$|[^a-z0-9])`, 'i').test(clean);
+  });
+}
+
+function scoreSingleTrackPreference(track, pref) {
+  if (!pref) return 0;
+  const trackLang = parseLangPreference(track?.lang);
+  const title = track?.title || '';
+  const isUnknownLang = !trackLang;
+
+  if (pref.family === 'pt') {
+    const hasBrTitle = titleMatchesTokens(title, ['pt-br', 'ptbr', 'pob', 'ptb', 'brasil', 'brazil', 'brazilian', 'dublado']);
+    const hasPtPtTitle = titleMatchesTokens(title, ['pt-pt', 'portugal', 'europeu', 'european', 'iberico']);
+    const hasPtTitle = hasBrTitle || hasPtPtTitle || titleMatchesTokens(title, ['portugues', 'portuguese', 'pt']);
+
+    if (trackLang?.family === 'pt') {
+      let score = 70;
+      if (trackLang.variant === 'br') score += 30;
+      else if (trackLang.variant === 'pt') score -= 15;
+      if (hasBrTitle) score += pref.variant === 'pt' ? 5 : 25;
+      if (hasPtPtTitle) score += pref.variant === 'pt' ? 30 : -15;
+      return score;
+    }
+    if (isUnknownLang && hasPtTitle) {
+      let score = 60;
+      if (hasBrTitle) score += pref.variant === 'pt' ? 0 : 25;
+      if (hasPtPtTitle) score += pref.variant === 'pt' ? 25 : -10;
+      return score;
+    }
+    return 0;
+  }
+
+  if (trackLang?.family === pref.family) {
+    let score = 75;
+    if (pref.variant && trackLang.variant === pref.variant) score += 25;
+    else if (pref.token === trackLang.token) score += 20;
+    return score;
+  }
+
+  const familyTokens = LANG_FAMILY_ALIASES[pref.family] || [pref.token];
+  const titleHints = familyTokens.filter((t) => t.length > 2);
+  if (isUnknownLang && titleHints.length && titleMatchesTokens(title, titleHints)) {
+    return 60;
+  }
+  return 0;
+}
+
+function findBestPreferredTrack(tracks, prefRaw) {
+  if (!Array.isArray(tracks) || !tracks.length) return null;
+  const prefs = String(prefRaw || '')
+    .split(/[,;]+/)
+    .map(parseLangPreference)
+    .filter(Boolean);
+  if (!prefs.length) return null;
+
+  let best = null;
+  for (const track of tracks) {
+    let trackScore = 0;
+    for (let i = 0; i < prefs.length; i += 1) {
+      const s = scoreSingleTrackPreference(track, prefs[i]);
+      if (s > 0) {
+        trackScore = Math.max(trackScore, s + Math.max(0, 5 - i));
+        break;
+      }
+    }
+    if (trackScore <= 0) continue;
+    if (!best || trackScore > best.score || (trackScore === best.score && track.selected && !best.track.selected)) {
+      best = { track, score: trackScore };
+    }
+  }
+  return best;
 }
 
 function languageLabelPt(code) {
@@ -4882,12 +5038,13 @@ async function handlePlayerUiEvent({ event_type: type, value }) {
     return;
   }
   if (type === 'selectAudioTrack') {
+    ctx.userSelectedAudio = true;
     if (value >= 0) await invoke('player_set_audio', { aid: String(Math.round(value)) });
     return;
   }
   if (type === 'selectBuiltInSubtitleTrack') {
     cancelSubtitleSync(ctx, true);
-    ctx.prefTracksApplied = true;
+    ctx.userSelectedSub = true;
     const tid = Math.round(value);
     ctx.selectedAddonIndex = -1;
     ctx.activeAddonSub = null;
@@ -4908,7 +5065,7 @@ async function handlePlayerUiEvent({ event_type: type, value }) {
     const sub = ctx.addonSubtitles[idx];
     if (!sub) return;
     cancelSubtitleSync(ctx, true);
-    ctx.prefTracksApplied = true;
+    ctx.userSelectedSub = true;
     ctx.selectedAddonIndex = idx;
     ctx.activeAddonSub = sub;
     ctx.activeSubOptionId = `addon:${sub.id || idx}`;
@@ -5324,7 +5481,12 @@ async function startInAppPlayback(req) {
     closeModalsToken: 0,
     submitIntroSuccessToken: 0,
     submitDraft: { segmentType: 'intro', startSec: 0, endSec: 0 },
-    prefTracksApplied: false,
+    prefAudioScore: 0,
+    prefAudioSig: '',
+    userSelectedAudio: false,
+    prefSubScore: 0,
+    prefSubSig: '',
+    userSelectedSub: false,
     controlsVisible: true,
     lastProgressSyncMs: Date.now(),
     discordWatchedMs: 0,
@@ -5404,17 +5566,38 @@ async function startInAppPlayback(req) {
       pushPlayerControls();
     }
 
-    // Preferred audio & subtitle auto-selection once tracks populate
-    if (!activePlayerCtx.prefTracksApplied && (st.audio_tracks.length || st.subtitle_tracks.length)) {
-      activePlayerCtx.prefTracksApplied = true;
-      const prefAud = normalizeLangCode(appSettings?.preferred_audio_lang);
-      const prefSub = normalizeLangCode(appSettings?.preferred_sub_lang);
-      const audMatch = prefAud && st.audio_tracks.find((t) => normalizeLangCode(t.lang).startsWith(prefAud.slice(0, 2)));
-      if (audMatch && !audMatch.selected) invoke('player_set_audio', { aid: String(audMatch.id) });
-      const subMatch = prefSub && st.subtitle_tracks.find((t) => normalizeLangCode(t.lang).startsWith(prefSub.slice(0, 2)));
-      if (subMatch && !subMatch.selected) {
-        invoke('player_set_subtitle', { sid: String(subMatch.id) });
-        activePlayerCtx.activeSubOptionId = `builtin:${subMatch.id}`;
+    // Preferred audio & subtitle auto-selection independently once each track list populates
+    if (!activePlayerCtx.userSelectedAudio && Array.isArray(st.audio_tracks) && st.audio_tracks.length) {
+      const audSig = st.audio_tracks.map((t) => `${t.id}:${t.lang}:${t.title}`).join('|');
+      if (audSig !== activePlayerCtx.prefAudioSig) {
+        activePlayerCtx.prefAudioSig = audSig;
+        const audMatch = findBestPreferredTrack(
+          st.audio_tracks,
+          appSettings?.preferred_audio_lang || 'por'
+        );
+        if (audMatch && audMatch.score > activePlayerCtx.prefAudioScore) {
+          activePlayerCtx.prefAudioScore = audMatch.score;
+          if (!audMatch.track.selected) {
+            invoke('player_set_audio', { aid: String(audMatch.track.id) }).catch(() => {});
+          }
+        }
+      }
+    }
+    if (!activePlayerCtx.userSelectedSub && Array.isArray(st.subtitle_tracks) && st.subtitle_tracks.length) {
+      const subSig = st.subtitle_tracks.map((t) => `${t.id}:${t.lang}:${t.title}`).join('|');
+      if (subSig !== activePlayerCtx.prefSubSig) {
+        activePlayerCtx.prefSubSig = subSig;
+        const subMatch = findBestPreferredTrack(
+          st.subtitle_tracks,
+          appSettings?.preferred_sub_lang || 'pt-br'
+        );
+        if (subMatch && subMatch.score > activePlayerCtx.prefSubScore) {
+          activePlayerCtx.prefSubScore = subMatch.score;
+          if (!subMatch.track.selected) {
+            invoke('player_set_subtitle', { sid: String(subMatch.track.id) }).catch(() => {});
+            activePlayerCtx.activeSubOptionId = `builtin:${subMatch.track.id}`;
+          }
+        }
       }
     }
 
@@ -5474,11 +5657,97 @@ async function startInAppPlayback(req) {
         startSecs: req.startSecs || null,
         initialControlsJson: initialObj ? JSON.stringify(initialObj) : null,
       });
+function getWebviewVideoEl() {
+  return document.getElementById('webview-html5-video');
+}
+
+function teardownWebviewVideo() {
+  const video = getWebviewVideoEl();
+  if (video) {
+    try { video.pause(); } catch {}
+    video.removeAttribute('src');
+    video.load();
+    video.remove();
+  }
+}
+
+function mountWebviewHtml5Player(req) {
+  teardownWebviewVideo();
+  const stage = document.getElementById('player-video-stage');
+  const statusEl = document.getElementById('player-stage-status');
+  if (statusEl) statusEl.textContent = 'Carregando vídeo…';
+  const video = document.createElement('video');
+  video.id = 'webview-html5-video';
+  video.className = 'webview-html5-video';
+  video.playsInline = true;
+  video.autoplay = true;
+  video.preload = 'auto';
+  video.src = req.url;
+
+  const emitWebviewState = () => {
+    if (!activePlayerCtx || activePlayerCtx.mode !== 'webview:html5') return;
+    const st = {
+      active: true,
+      paused: video.paused,
+      buffering: video.readyState < 3 && !video.paused && !video.ended,
+      loading: video.readyState < 2 && !video.error,
+      ended: video.ended,
+      position_secs: Number(video.currentTime) || 0,
+      duration_secs: Number.isFinite(video.duration) ? video.duration : 0,
+      buffered_secs: 0,
+      volume: Math.round((video.muted ? 0 : video.volume) * 100),
+      speed: video.playbackRate || 1,
+      audio_tracks: [],
+      subtitle_tracks: [],
+      chapters: [],
+    };
+    activePlayerCtx.latestState = st;
+    updateFallbackPlayerUi(st);
+    syncActivePlayerWatchProgress(false);
+  };
+
+  video.addEventListener('loadedmetadata', () => {
+    if (statusEl) statusEl.textContent = '';
+    if (req.startSecs && req.startSecs > 0 && Number.isFinite(video.duration)) {
+      video.currentTime = Math.min(req.startSecs, Math.max(0, video.duration - 2));
+    }
+    emitWebviewState();
+  });
+  video.addEventListener('playing', () => {
+    if (statusEl) statusEl.textContent = '';
+    emitWebviewState();
+  });
+  video.addEventListener('pause', () => {
+    emitWebviewState();
+    syncActivePlayerWatchProgress(true);
+  });
+  video.addEventListener('timeupdate', emitWebviewState);
+  video.addEventListener('waiting', emitWebviewState);
+  video.addEventListener('ended', () => {
+    emitWebviewState();
+    syncActivePlayerWatchProgress(true);
+  });
+  video.addEventListener('error', () => {
+    if (statusEl) statusEl.textContent = 'Formato não suportado pelo WebView. Tente outro stream.';
+  });
+  video.addEventListener('click', () => {
+    if (video.paused) video.play().catch(() => {});
+    else video.pause();
+  });
+
+  stage.prepend(video);
+  video.play().catch(() => {});
+}
+
       if (mode === 'embedded:overlay') {
         playerShell.classList.remove('fallback-active');
         playerShell.classList.add('overlay-active');
         invoke('player_set_bounds', getPlayerStageBounds());
         pushPlayerControls();
+      } else if (mode === 'webview:html5') {
+        if (activePlayerCtx) activePlayerCtx.mode = 'webview:html5';
+        playerShell.classList.add('fallback-active');
+        mountWebviewHtml5Player(req);
       } else if (mode.startsWith('external:')) {
         playerShell.classList.add('fallback-active');
         document.getElementById('player-stage-status').textContent = `Aberto no player externo (${mode})`;
@@ -5539,6 +5808,7 @@ async function closeEmbeddedPlayer() {
     await mdblistSendScrobble(activePlayerCtx, activePlayerCtx.latestState, true);
   }
   await syncActivePlayerWatchProgress(true);
+  teardownWebviewVideo();
   playerActive = false;
   activePlayerCtx = null;
   document.getElementById('player-shell').classList.remove('overlay-active', 'fallback-active');
@@ -5574,17 +5844,29 @@ function blockFallbackControlIfPartyLocked() {
 document.getElementById('btn-player-back').addEventListener('click', closeEmbeddedPlayer);
 document.getElementById('btn-player-playpause').addEventListener('click', () => {
   if (blockFallbackControlIfPartyLocked()) return;
+  const v = getWebviewVideoEl();
+  if (v) {
+    if (v.paused) v.play().catch(() => {});
+    else v.pause();
+    return;
+  }
   invoke('player_set_paused', { paused: !playerCurrentPaused });
 });
 document.getElementById('btn-player-back10').addEventListener('click', () => {
   if (blockFallbackControlIfPartyLocked()) return;
   const cur = Number(document.getElementById('player-seek').value) || 0;
-  invoke('player_seek', { secs: Math.max(0, cur - 10) });
+  const next = Math.max(0, cur - 10);
+  const v = getWebviewVideoEl();
+  if (v) { v.currentTime = next; return; }
+  invoke('player_seek', { secs: next });
 });
 document.getElementById('btn-player-fwd10').addEventListener('click', () => {
   if (blockFallbackControlIfPartyLocked()) return;
   const cur = Number(document.getElementById('player-seek').value) || 0;
-  invoke('player_seek', { secs: cur + 10 });
+  const next = cur + 10;
+  const v = getWebviewVideoEl();
+  if (v) { v.currentTime = next; return; }
+  invoke('player_seek', { secs: next });
 });
 
 const seekInput = document.getElementById('player-seek');
@@ -5596,15 +5878,25 @@ seekInput.addEventListener('input', () => { playerSeeking = true; });
 seekInput.addEventListener('change', () => {
   playerSeeking = false;
   if (blockFallbackControlIfPartyLocked()) return;
-  invoke('player_seek', { secs: Number(seekInput.value) });
+  const secs = Number(seekInput.value);
+  const v = getWebviewVideoEl();
+  if (v) { v.currentTime = secs; return; }
+  invoke('player_seek', { secs });
 });
 document.getElementById('player-volume').addEventListener('input', (e) => {
-  invoke('player_set_volume', { volume: Number(e.target.value) });
+  const vol = Number(e.target.value);
+  const v = getWebviewVideoEl();
+  if (v) { v.volume = Math.max(0, Math.min(1, vol / 100)); return; }
+  invoke('player_set_volume', { volume: vol });
 });
 document.getElementById('player-speed-select').addEventListener('change', (e) => {
-  invoke('player_set_speed', { speed: Number(e.target.value) });
+  const speed = Number(e.target.value);
+  const v = getWebviewVideoEl();
+  if (v) { v.playbackRate = speed; return; }
+  invoke('player_set_speed', { speed });
 });
 document.getElementById('player-audio-select').addEventListener('change', (e) => {
+  if (activePlayerCtx) activePlayerCtx.userSelectedAudio = true;
   invoke('player_set_audio', { aid: e.target.value });
 });
 document.getElementById('player-sub-select').addEventListener('change', (e) => {
@@ -5954,6 +6246,37 @@ function syncDiscoverSelection() {
   loadDiscoverPage(true);
 }
 
+const DISCOVER_MEM_CACHE_TTL_MS = 10 * 60 * 1000;
+const discoverPageMemCache = new Map();
+const discoverPageInFlight = new Map();
+
+function fetchCatalogPageCached(params) {
+  const cacheKey = `${params.manifestUrl}|${params.mediaType}|${params.catalogId}|${params.skip || 0}|${params.genre || ''}`;
+  const hit = discoverPageMemCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < DISCOVER_MEM_CACHE_TTL_MS) {
+    return Promise.resolve(hit.items);
+  }
+  if (discoverPageInFlight.has(cacheKey)) {
+    return discoverPageInFlight.get(cacheKey);
+  }
+  const req = invoke('load_catalog_page', params)
+    .then((items) => {
+      if (Array.isArray(items) && items.length) {
+        if (discoverPageMemCache.has(cacheKey)) discoverPageMemCache.delete(cacheKey);
+        discoverPageMemCache.set(cacheKey, { at: Date.now(), items });
+        while (discoverPageMemCache.size > 60) {
+          const oldest = discoverPageMemCache.keys().next().value;
+          if (!oldest) break;
+          discoverPageMemCache.delete(oldest);
+        }
+      }
+      return items;
+    })
+    .finally(() => discoverPageInFlight.delete(cacheKey));
+  discoverPageInFlight.set(cacheKey, req);
+  return req;
+}
+
 function maybeInfiniteDiscover() {
   if (!discoverLoading && discoverHasMore) {
     loadDiscoverPage(false);
@@ -5969,24 +6292,28 @@ async function loadDiscoverPage(reset) {
   const gridEl = document.getElementById('discover-grid');
   const statusEl = document.getElementById('discover-status');
   const loadBtn = document.getElementById('btn-discover-load-more');
+  const skipVal = reset ? 0 : discoverItems.length;
+  const reqParams = {
+    manifestUrl: activeCat.manifestUrl,
+    mediaType: activeCat.type,
+    catalogId: activeCat.catalogId,
+    skip: skipVal,
+    genre: discoverSelectedGenre,
+    search: null,
+  };
+  const cacheKey = `${reqParams.manifestUrl}|${reqParams.mediaType}|${reqParams.catalogId}|${reqParams.skip}|${reqParams.genre || ''}`;
+  const hasWarmCache = discoverPageMemCache.has(cacheKey);
 
   if (reset) {
     discoverItems = [];
     discoverSeen.clear();
     gridEl.innerHTML = '';
-    statusEl.textContent = 'Carregando catálogo…';
+    if (!hasWarmCache) statusEl.textContent = 'Carregando catálogo…';
   }
   loadBtn.disabled = true;
 
   try {
-    const page = await invoke('load_catalog_page', {
-      manifestUrl: activeCat.manifestUrl,
-      mediaType: activeCat.type,
-      catalogId: activeCat.catalogId,
-      skip: reset ? 0 : discoverItems.length,
-      genre: discoverSelectedGenre,
-      search: null,
-    });
+    const page = await fetchCatalogPageCached(reqParams);
     if (request !== discoverRequest) return;
     const added = [];
     for (const item of page) {
@@ -6006,6 +6333,13 @@ async function loadDiscoverPage(reset) {
     discoverHasMore = page.length >= 10 && added.length > 0;
     loadBtn.classList.toggle('hidden', !discoverHasMore);
     statusEl.textContent = discoverItems.length ? `${discoverItems.length} item(ns)` : 'Nenhum item neste catálogo.';
+    if (discoverHasMore && reset) {
+      setTimeout(() => {
+        if (request === discoverRequest) {
+          fetchCatalogPageCached({ ...reqParams, skip: discoverItems.length }).catch(() => {});
+        }
+      }, 300);
+    }
   } catch (e) {
     if (request !== discoverRequest) return;
     statusEl.textContent = String(e);
@@ -6052,15 +6386,17 @@ document.querySelectorAll('[data-library-tab]').forEach((btn) => {
 });
 
 // --- LIBRARY CALENDAR (Desktop-first release planner) ---
-const LIBRARY_CALENDAR_CACHE_KEY = 'nuvio-library-calendar-v4';
-const LIBRARY_CALENDAR_TTL_MS = 6 * 60 * 60 * 1000;
+const LIBRARY_CALENDAR_CACHE_KEY = 'nuvio-library-calendar-v5';
+const LIBRARY_CALENDAR_TTL_MS = 3 * 60 * 60 * 1000;
 const LIBRARY_CALENDAR_MAX_SERIES = 120;
+const LIBRARY_CALENDAR_LOOKBACK_DAYS = 7;
 const LIBRARY_CALENDAR_WINDOW_DAYS = 210;
 const LIBRARY_CALENDAR_MONTHS = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
 const LIBRARY_CALENDAR_MONTHS_SHORT = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
 const LIBRARY_CALENDAR_WEEKDAYS = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
+const LIBRARY_CALENDAR_WEEKDAYS_SHORT = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'];
 let libraryCalendarLoading = false;
-const libraryCalendarState = { rows: [], month: null, selected: null, view: 'month', query: '' };
+const libraryCalendarState = { rows: [], month: null, selected: null, view: 'month', scope: 'all', query: '' };
 const CALENDAR_CHEVRON_LEFT = '<svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M15.41 16.59 14 18l-6-6 6-6 1.41 1.41L10.83 12z"/></svg>';
 const CALENDAR_CHEVRON_RIGHT = '<svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M8.59 16.59 10 18l6-6-6-6-1.41 1.41L13.17 12z"/></svg>';
 const CALENDAR_REFRESH_SVG = '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4z"/></svg>';
@@ -6113,9 +6449,35 @@ function calendarRelativeLabel(date) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const diff = Math.round((date - today) / 86400000);
+  if (diff < 0) return 'Já disponível';
   if (diff === 0) return 'Hoje';
   if (diff === 1) return 'Amanhã';
   return `Em ${diff} dias`;
+}
+
+function calendarShortDayLabel(iso) {
+  const d = calendarParseDay(iso);
+  if (!d) return '';
+  return `${LIBRARY_CALENDAR_WEEKDAYS_SHORT[d.getDay()]}, ${d.getDate()} ${LIBRARY_CALENDAR_MONTHS_SHORT[d.getMonth()]}`;
+}
+
+function calendarScheduleNote(row) {
+  const parts = [];
+  if (row.streamingDate && row.tvDate && row.streamingDate !== row.tvDate) {
+    parts.push(`Streaming: ${calendarShortDayLabel(row.streamingDate)}`);
+    parts.push(`TV: ${calendarShortDayLabel(row.tvDate)}`);
+  } else if (row.streamingDate && row.platform) {
+    parts.push(`${row.platform} · ${calendarShortDayLabel(row.streamingDate)}`);
+  } else if (row.tvDate && row.network) {
+    parts.push(`TV (${row.network}) · ${calendarShortDayLabel(row.tvDate)}`);
+  }
+  return parts.join(' • ');
+}
+
+function isCalendarEpisodeWatched(row) {
+  if (!row.id || !row.season || !row.episode) return false;
+  return watchedSet.has(`${row.id}:${row.season}:${row.episode}`)
+    || (row.imdbId ? watchedSet.has(`${row.imdbId}:${row.season}:${row.episode}`) : false);
 }
 
 function calendarReleaseLabel(row) {
@@ -6155,21 +6517,24 @@ async function resolveCalendarTmdbIds(series, stored, onProgress) {
 }
 
 function buildLibraryCalendarRows(items, tmdbIds) {
+  const byId = new Map();
   const byTmdb = new Map();
   for (const item of librarySeriesForCalendar()) {
+    byId.set(item.id, item);
     const id = Number(tmdbIds?.[item.id]);
     if (id > 0 && !byTmdb.has(id)) byTmdb.set(id, item);
   }
   const today = new Date();
   today.setHours(0, 0, 0, 0);
+  const start = new Date(today.getTime() - LIBRARY_CALENDAR_LOOKBACK_DAYS * 86400000);
   const end = new Date(today.getTime() + LIBRARY_CALENDAR_WINDOW_DAYS * 86400000);
   const seen = new Set();
   const dated = [];
   const undated = [];
   for (const it of Array.isArray(items) ? items : []) {
-    const series = byTmdb.get(Number(it.tmdb_id));
+    const series = (it.id ? byId.get(String(it.id)) : null) || byTmdb.get(Number(it.tmdb_id));
     const date = calendarParseDay(it.released);
-    // Episódios que o TMDB já lista mas ainda sem data vão para o fim da agenda.
+    // Episódios já listados mas ainda sem data vão para o fim da agenda.
     if (!date && !it.undated) continue;
     const row = {
       date,
@@ -6177,19 +6542,26 @@ function buildLibraryCalendarRows(items, tmdbIds) {
       poster: it.poster || series?.poster || '',
       backdrop: it.backdrop || '',
       name: series?.name || it.name || '',
-      id: series?.id || '',
+      id: series?.id || it.id || '',
+      imdbId: it.imdb_id || '',
       tmdbId: Number(it.tmdb_id) || 0,
       season: Number(it.season) || 0,
       episode: Number(it.episode) || 0,
       episodeTitle: it.title || '',
       overview: it.overview || '',
+      streamingDate: it.streaming_date || '',
+      tvDate: it.tv_date || '',
+      airstamp: it.airstamp || '',
+      platform: it.platform || '',
+      network: it.network || '',
+      scheduleDays: Array.isArray(it.schedule_days) ? it.schedule_days : [],
       undated: !date,
     };
-    const key = `${row.tmdbId}:${row.day}:${row.season}:${row.episode}`;
+    const key = `${row.id || row.tmdbId}:${row.day}:${row.season}:${row.episode}`;
     if (seen.has(key)) continue;
     seen.add(key);
     if (!date) undated.push(row);
-    else if (date >= today && date <= end) dated.push(row);
+    else if (date >= start && date <= end) dated.push(row);
   }
   dated.sort((a, b) => a.date - b.date || a.name.localeCompare(b.name));
   undated.sort((a, b) => a.name.localeCompare(b.name) || a.episode - b.episode);
@@ -6241,16 +6613,30 @@ function drawLibraryCalendar() {
   if (!wrap || !allRows.length) return;
 
   const q = libraryCalendarState.query.trim().toLowerCase();
-  const rows = q
-    ? allRows.filter((r) => r.name.toLowerCase().includes(q) || r.episodeTitle.toLowerCase().includes(q))
-    : allRows;
-
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const todayKey = calendarDayKey(today);
   const tomorrowKey = calendarDayKey(new Date(today.getTime() + 86400000));
   const weekStartOfToday = calendarWeekStart(today);
+  const weekStartKey = calendarDayKey(weekStartOfToday);
   const weekEndKey = calendarDayKey(new Date(weekStartOfToday.getTime() + 6 * 86400000));
+  const next7EndKey = calendarDayKey(new Date(today.getTime() + 7 * 86400000));
+  const scope = libraryCalendarState.scope || 'all';
+
+  let rows = allRows;
+  if (scope === 'week') {
+    rows = rows.filter((r) => r.day && r.day >= weekStartKey && r.day <= weekEndKey);
+  } else if (scope === 'next7') {
+    rows = rows.filter((r) => r.day && r.day >= todayKey && r.day <= next7EndKey);
+  }
+  if (q) {
+    rows = rows.filter((r) =>
+      r.name.toLowerCase().includes(q)
+      || r.episodeTitle.toLowerCase().includes(q)
+      || r.platform.toLowerCase().includes(q)
+      || r.network.toLowerCase().includes(q)
+    );
+  }
 
   const month = libraryCalendarState.month || calendarStartOfMonth(today);
   const monthKey = `${month.getFullYear()}-${String(month.getMonth() + 1).padStart(2, '0')}`;
@@ -6271,7 +6657,7 @@ function drawLibraryCalendar() {
     if (!row.day) continue;
     if (row.day.startsWith(monthKey)) monthCount += 1;
     if (row.day === todayKey) todayCount += 1;
-    if (row.day >= todayKey && row.day <= weekEndKey) weekCount += 1;
+    if (row.day >= weekStartKey && row.day <= weekEndKey) weekCount += 1;
   }
 
   const datedRows = rows.filter((row) => row.date);
@@ -6281,18 +6667,28 @@ function drawLibraryCalendar() {
   const canPrev = view === 'week' ? true : month.getTime() > firstMonth.getTime();
   const canNext = view === 'week' ? true : month.getTime() < lastMonth.getTime();
 
-  const calendarItemHtml = (row, compact = false) => `
-    <button class="calendar-item${compact ? ' is-compact' : ''}" type="button" data-calendar-id="${esc(row.id)}" data-calendar-name="${esc(row.name)}" data-calendar-poster="${esc(row.poster)}">
+  const calendarItemHtml = (row, compact = false) => {
+    const note = calendarScheduleNote(row);
+    const serviceBadge = row.platform || row.network;
+    const watched = isCalendarEpisodeWatched(row);
+    return `
+    <button class="calendar-item${compact ? ' is-compact' : ''}${watched ? ' is-watched' : ''}" type="button" data-calendar-id="${esc(row.id)}" data-calendar-name="${esc(row.name)}" data-calendar-poster="${esc(row.poster)}">
       <span class="calendar-item-art">
         ${row.backdrop || row.poster ? `<img src="${esc(row.backdrop || row.poster)}" alt="" loading="lazy" decoding="async" />` : ''}
       </span>
       <span class="calendar-item-body">
-        <span class="calendar-item-name">${esc(row.name)}</span>
+        <span class="calendar-item-top">
+          <span class="calendar-item-name">${esc(row.name)}</span>
+          ${serviceBadge ? `<span class="cal-platform-pill">${esc(serviceBadge)}</span>` : ''}
+          ${watched ? '<span class="cal-watched-pill" title="Episódio assistido">&#10003;</span>' : ''}
+        </span>
         <span class="calendar-item-ep">${esc(calendarReleaseLabel(row))}</span>
+        ${note ? `<span class="calendar-item-schedule">${esc(note)}</span>` : ''}
         ${!compact && row.overview ? `<span class="calendar-item-overview">${esc(row.overview)}</span>` : ''}
       </span>
       <span class="calendar-item-chevron">${CALENDAR_CHEVRON_RIGHT}</span>
     </button>`;
+  };
 
   const selectedDateObj = calendarParseDay(selected) || today;
   const activeWeekStart = calendarWeekStart(selectedDateObj);
@@ -6366,7 +6762,7 @@ function drawLibraryCalendar() {
               <h3 class="calendar-agenda-title">${esc(calendarLongDate(selectedDateObj))}</h3>
               <span class="calendar-agenda-date">${selectedDayRows.length ? `${selectedDayRows.length} ${selectedDayRows.length === 1 ? 'estreia neste dia' : 'estreias neste dia'}` : 'Nenhum episódio neste dia'}</span>
             </div>
-            ${selected === todayKey || selected === tomorrowKey ? `<span class="calendar-day-now">${esc(calendarRelativeLabel(selectedDateObj))}</span>` : ''}
+            ${selected <= tomorrowKey ? `<span class="calendar-day-now">${esc(calendarRelativeLabel(selectedDateObj))}</span>` : ''}
           </div>
           <div class="calendar-list">
             ${selectedDayRows.length
@@ -6376,7 +6772,7 @@ function drawLibraryCalendar() {
               <div class="cal-upcoming-divider">Próximos dias</div>
               ${upcomingGroups.map((group) => {
                 const date = calendarParseDay(group.day);
-                const near = group.day === todayKey || group.day === tomorrowKey;
+                const near = group.day <= tomorrowKey;
                 return `
                 <section class="calendar-day-group">
                   <header class="calendar-day-head">
@@ -6436,7 +6832,7 @@ function drawLibraryCalendar() {
       <div class="cal-timeline-list">
         ${groups.map((group) => {
           const date = calendarParseDay(group.day);
-          const near = group.day === todayKey || group.day === tomorrowKey;
+          const near = group.day <= tomorrowKey;
           return `
           <section class="cal-timeline-group">
             <header class="calendar-day-head">
@@ -6461,9 +6857,14 @@ function drawLibraryCalendar() {
         <div class="cal-toolbar-left">
           <h3 class="calendar-month">${esc(headingTitle)}</h3>
           <div class="cal-stats-row">${statsHtml}</div>
+          <div class="cal-scope-pills" role="group" aria-label="Período do calendário">
+            <button type="button" class="cal-scope-btn${scope === 'all' ? ' active' : ''}" data-calendar-scope="all">Todos</button>
+            <button type="button" class="cal-scope-btn${scope === 'week' ? ' active' : ''}" data-calendar-scope="week">Esta semana</button>
+            <button type="button" class="cal-scope-btn${scope === 'next7' ? ' active' : ''}" data-calendar-scope="next7">Próx. 7 dias</button>
+          </div>
         </div>
         <div class="cal-toolbar-right">
-          <input type="search" class="cal-search-input" id="cal-series-filter" placeholder="Filtrar série ou episódio…" value="${esc(libraryCalendarState.query)}" />
+          <input type="search" class="cal-search-input" id="cal-series-filter" placeholder="Filtrar série ou plataforma…" value="${esc(libraryCalendarState.query)}" />
           <div class="cal-view-switch" role="tablist" aria-label="Modo de visualização do calendário">
             <button type="button" class="cal-view-btn${view === 'month' ? ' active' : ''}" data-calendar-view="month">Mês</button>
             <button type="button" class="cal-view-btn${view === 'week' ? ' active' : ''}" data-calendar-view="week">Semana</button>
@@ -6483,6 +6884,13 @@ function drawLibraryCalendar() {
   wrap.querySelectorAll('[data-calendar-view]').forEach((btn) => {
     btn.addEventListener('click', () => {
       libraryCalendarState.view = btn.dataset.calendarView || 'month';
+      drawLibraryCalendar();
+    });
+  });
+
+  wrap.querySelectorAll('[data-calendar-scope]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      libraryCalendarState.scope = btn.dataset.calendarScope || 'all';
       drawLibraryCalendar();
     });
   });
@@ -6564,29 +6972,39 @@ async function loadLibraryCalendar(force = false) {
   libraryCalendarLoading = true;
   try {
     if (status) status.textContent = 'A preparar o calendário…';
-    const tmdbIds = await resolveCalendarTmdbIds(
-      series.slice(0, LIBRARY_CALENDAR_MAX_SERIES),
-      cached?.tmdbIds,
-      (done, total) => {
-        if (status) status.textContent = `A identificar séries no TMDB… ${done}/${total}`;
-      },
-    );
-    const ids = [...new Set(Object.values(tmdbIds))];
-    let items = [];
-    if (ids.length) {
-      if (status) status.textContent = 'A buscar os episódios…';
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      items = (await invoke('tmdb_next_episodes', { series: ids, from: calendarDayKey(today) }).catch(() => [])) || [];
-    }
+    const limited = series.slice(0, LIBRARY_CALENDAR_MAX_SERIES);
+    const tmdbEnabled = Boolean(appSettings?.services?.tmdb_enabled);
+    const tmdbIds = tmdbEnabled
+      ? await resolveCalendarTmdbIds(
+          limited,
+          cached?.tmdbIds,
+          (done, total) => {
+            if (status) status.textContent = `A identificar séries no TMDB… ${done}/${total}`;
+          },
+        )
+      : (cached?.tmdbIds || {});
+    if (status) status.textContent = 'A buscar datas oficiais de streaming e TV…';
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const lookback = new Date(today.getTime() - LIBRARY_CALENDAR_LOOKBACK_DAYS * 86400000);
+    const seriesPayload = limited.map((s) => ({
+      id: s.id,
+      name: s.name,
+      tmdbId: Number(tmdbIds?.[s.id]) || null,
+      imdbId: /^tt\d+$/i.test(s.id) ? s.id : null,
+      poster: s.poster || null,
+    }));
+    const items = (await invoke('calendar_episodes', {
+      series: seriesPayload,
+      from: calendarDayKey(lookback),
+      force,
+    }).catch(() => [])) || [];
     localStorage.setItem(LIBRARY_CALENDAR_CACHE_KEY, JSON.stringify({ signature, at: Date.now(), tmdbIds, items }));
     renderLibraryCalendar(items, tmdbIds);
     if (status) {
       status.textContent = items.length
         ? ''
-        : ids.length
-          ? 'Sem estreias anunciadas para as séries da biblioteca.'
-          : 'Ativa o TMDB em Integrações → Serviços conectados para ver o calendário.';
+        : 'Sem estreias anunciadas para as séries da biblioteca.';
     }
   } finally {
     libraryCalendarLoading = false;

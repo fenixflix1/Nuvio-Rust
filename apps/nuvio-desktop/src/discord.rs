@@ -49,7 +49,7 @@ static ASSET_SUPPORT: AtomicU8 = AtomicU8::new(0);
 // `discord-ipc-N` contract, either as official sockets or inside their own
 // runtime directory. Collect every candidate instead of giving up on the first
 // endpoint that accepts a connection but does not answer the handshake.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android")))]
 fn socket_paths() -> Vec<std::path::PathBuf> {
     use std::path::PathBuf;
     let mut roots: Vec<PathBuf> = ["XDG_RUNTIME_DIR", "TMPDIR", "TMP", "TEMP"]
@@ -87,7 +87,7 @@ fn socket_paths() -> Vec<std::path::PathBuf> {
 
 /// Walks the runtime roots and their `app/*` subdirectories (Flatpak, Snap and
 /// fork runtimes such as Serein) so every `discord*-ipc-N` endpoint is found.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android")))]
 fn collect_sockets(dir: &std::path::Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -108,7 +108,7 @@ fn collect_sockets(dir: &std::path::Path, depth: usize, out: &mut Vec<std::path:
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android")))]
 async fn connect_candidates() -> Vec<(String, Result<Socket, String>)> {
     let mut out = Vec::new();
     for path in socket_paths() {
@@ -120,6 +120,11 @@ async fn connect_candidates() -> Vec<(String, Result<Socket, String>)> {
         out.push((label, result));
     }
     out
+}
+
+#[cfg(target_os = "android")]
+async fn connect_candidates() -> Vec<(String, Result<Socket, String>)> {
+    Vec::new()
 }
 
 #[cfg(windows)]

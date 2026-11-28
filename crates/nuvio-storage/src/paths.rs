@@ -68,8 +68,10 @@ impl AppPaths {
 
     pub fn from_root(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref();
-        let config_dir = root.join("config");
-        let cache_dir = root.join("cache");
+        Self::from_dirs(root.join("config"), root.join("cache"))
+    }
+
+    pub fn from_dirs(config_dir: PathBuf, cache_dir: PathBuf) -> Result<Self> {
         fs::create_dir_all(&config_dir)?;
         fs::create_dir_all(&cache_dir)?;
         Ok(Self {

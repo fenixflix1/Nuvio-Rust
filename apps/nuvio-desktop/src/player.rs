@@ -1738,6 +1738,13 @@ fn create_and_init_mpv(
             }
         }
 
+        if let Some(ref alang) = options.alang {
+            let _ = mpv_set_opt(api, handle, "alang", alang);
+        }
+        if let Some(ref slang) = options.slang {
+            let _ = mpv_set_opt(api, handle, "slang", slang);
+        }
+
         for &(key, value) in &options.options {
             if let Err(error) = mpv_set_opt(api, handle, key, value) {
                 unsafe { (api.terminate_destroy)(handle) };

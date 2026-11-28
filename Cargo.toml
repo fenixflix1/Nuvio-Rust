@@ -17,7 +17,7 @@ license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
 tokio = { version = "1.54", features = ["full"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "query", "form"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "query", "form", "gzip", "deflate"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }

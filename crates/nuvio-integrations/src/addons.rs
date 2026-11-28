@@ -50,7 +50,7 @@ pub struct AddonBehaviorHints {
     pub p2p: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MetaPreview {
     pub id: String,
     pub r#type: String,
@@ -432,74 +432,14 @@ impl AddonClient {
         let url = manifest.resource_url("catalog", media_type, catalog_id, extra);
         let resp = self.http.get(url).send().await?;
         let status = resp.status();
-        let body = resp.text().await?;
+        let bytes = resp.bytes().await?;
         if !status.is_success() {
             return Err(IntegrationError::Api {
                 status: status.as_u16(),
-                body,
+                body: String::from_utf8_lossy(&bytes).into_owned(),
             });
         }
-        let root: Value = serde_json::from_str(&body)?;
-        let Some(metas) = root.get("metas").and_then(Value::as_array) else {
-            return Ok(Vec::new());
-        };
-
-        let mut items = Vec::new();
-        for meta in metas {
-            if max_items.is_some_and(|m| items.len() >= m) {
-                break;
-            }
-            let Some(obj) = meta.as_object() else {
-                continue;
-            };
-            let Some(id) = obj.get("id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) else {
-                continue;
-            };
-            let Some(name) = obj.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
-            else {
-                continue;
-            };
-            let item_type = obj
-                .get("type")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .unwrap_or(media_type);
-
-            let opt_s = |k: &str| -> Option<String> {
-                obj.get(k)
-                    .and_then(|v| v.as_str())
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-            };
-
-            let landscape = opt_s("landscapePoster");
-            let banner = opt_s("banner")
-                .or_else(|| opt_s("background"))
-                .or(landscape);
-
-            let imdb_rating = obj.get("imdbRating").and_then(|v| match v {
-                Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
-                Value::Number(n) => Some(n.to_string()),
-                _ => None,
-            });
-
-            items.push(MetaPreview {
-                id: id.to_string(),
-                r#type: item_type.to_string(),
-                name: name.to_string(),
-                poster: opt_s("poster"),
-                banner,
-                logo: opt_s("logo"),
-                poster_shape: opt_s("posterShape").unwrap_or_else(|| "poster".to_string()),
-                description: opt_s("description"),
-                release_info: opt_s("releaseInfo").or_else(|| opt_s("released")),
-                imdb_rating,
-                genres: str_list(obj.get("genres")),
-                runtime: opt_s("runtime"),
-            });
-        }
-        Ok(items)
+        Ok(parse_catalog_metas(&bytes, media_type, max_items)?)
     }
 
     pub async fn fetch_meta(
@@ -645,6 +585,129 @@ impl AddonClient {
     }
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct RawCatalogResponse {
+    metas: Vec<RawCatalogMeta>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct RawCatalogMeta {
+    id: Option<String>,
+    #[serde(rename = "type")]
+    r#type: Option<String>,
+    name: Option<String>,
+    poster: Option<String>,
+    banner: Option<String>,
+    background: Option<String>,
+    #[serde(rename = "landscapePoster")]
+    landscape_poster: Option<String>,
+    logo: Option<String>,
+    #[serde(rename = "posterShape")]
+    poster_shape: Option<String>,
+    description: Option<String>,
+    #[serde(rename = "releaseInfo")]
+    release_info: Option<String>,
+    released: Option<String>,
+    #[serde(rename = "imdbRating", deserialize_with = "deserialize_rating")]
+    imdb_rating: Option<String>,
+    #[serde(deserialize_with = "deserialize_opt_str_list")]
+    genres: Vec<String>,
+    runtime: Option<String>,
+}
+
+fn deserialize_rating<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let val: Option<Value> = Option::deserialize(deserializer)?;
+    Ok(match val {
+        Some(Value::String(s)) => {
+            let t = s.trim();
+            (!t.is_empty()).then(|| t.to_string())
+        }
+        Some(Value::Number(n)) => Some(n.to_string()),
+        _ => None,
+    })
+}
+
+fn deserialize_opt_str_list<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let val: Option<Vec<Value>> = Option::deserialize(deserializer)?;
+    Ok(val
+        .into_iter()
+        .flatten()
+        .filter_map(|v| match v {
+            Value::String(s) => {
+                let t = s.trim();
+                (!t.is_empty()).then(|| t.to_string())
+            }
+            _ => None,
+        })
+        .collect())
+}
+
+fn clean_opt(v: Option<String>) -> Option<String> {
+    v.and_then(|s| {
+        let t = s.trim();
+        if t.is_empty() {
+            None
+        } else if t.len() == s.len() {
+            Some(s)
+        } else {
+            Some(t.to_string())
+        }
+    })
+}
+
+pub fn parse_catalog_metas(
+    bytes: &[u8],
+    default_media_type: &str,
+    max_items: Option<usize>,
+) -> Result<Vec<MetaPreview>> {
+    let root: RawCatalogResponse = serde_json::from_slice(bytes)?;
+    let cap = max_items
+        .map(|m| m.min(root.metas.len()))
+        .unwrap_or(root.metas.len());
+    let mut items = Vec::with_capacity(cap);
+    for meta in root.metas {
+        if max_items.is_some_and(|m| items.len() >= m) {
+            break;
+        }
+        let Some(id) = meta.id.filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let Some(name) = meta.name.filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let item_type = meta
+            .r#type
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| default_media_type.to_string());
+        let banner = clean_opt(meta.banner)
+            .or_else(|| clean_opt(meta.background))
+            .or_else(|| clean_opt(meta.landscape_poster));
+        items.push(MetaPreview {
+            id,
+            r#type: item_type,
+            name,
+            poster: clean_opt(meta.poster),
+            banner,
+            logo: clean_opt(meta.logo),
+            poster_shape: clean_opt(meta.poster_shape).unwrap_or_else(|| "poster".to_string()),
+            description: clean_opt(meta.description),
+            release_info: clean_opt(meta.release_info).or_else(|| clean_opt(meta.released)),
+            imdb_rating: meta.imdb_rating,
+            genres: meta.genres,
+            runtime: clean_opt(meta.runtime),
+        });
+    }
+    Ok(items)
+}
+
 fn str_list(val: Option<&Value>) -> Vec<String> {
     val.and_then(|v| v.as_array())
         .map(|arr| {
@@ -690,5 +753,26 @@ mod tests {
         assert!(!m.supports_resource("stream", "series", "tt123456"));
         assert!(m.behavior_hints.p2p);
         assert_eq!(m.catalogs.len(), 1);
+    }
+
+    #[test]
+    fn parses_catalog_metas_fast_and_handles_types() {
+        let payload = br#"{
+            "metas": [
+                {"id": "tt1", "name": "One", "imdbRating": 8.7, "genres": ["Drama", null, "Crime"], "background": "https://img/bg.jpg", "videos": [{"id": "skip"}]},
+                {"id": "", "name": "Missing Id"},
+                {"id": "tt2", "type": "series", "name": "Two", "imdbRating": "7.5", "released": "2026-11-27"}
+            ]
+        }"#;
+        let all = parse_catalog_metas(payload, "movie", None).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].imdb_rating.as_deref(), Some("8.7"));
+        assert_eq!(all[0].genres, vec!["Drama", "Crime"]);
+        assert_eq!(all[0].banner.as_deref(), Some("https://img/bg.jpg"));
+        assert_eq!(all[1].r#type, "series");
+        assert_eq!(all[1].release_info.as_deref(), Some("2026-11-27"));
+
+        let capped = parse_catalog_metas(payload, "movie", Some(1)).unwrap();
+        assert_eq!(capped.len(), 1);
     }
 }

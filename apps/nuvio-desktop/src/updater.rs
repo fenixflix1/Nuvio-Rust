@@ -137,6 +137,31 @@ fn select_platform_asset<'a>(
                 .find(|a| a.name.eq_ignore_ascii_case("NuvioDesktop-Rust.exe"))
                 .or_else(|| exes.first().copied())
         }
+        "android" => {
+            let apks: Vec<&GitHubAsset> = assets
+                .iter()
+                .filter(|a| a.name.to_ascii_lowercase().ends_with(".apk"))
+                .collect();
+            if arch == "aarch64" {
+                apks.iter()
+                    .copied()
+                    .find(|a| {
+                        let lower = a.name.to_ascii_lowercase();
+                        lower.contains("arm64") || lower.contains("aarch64")
+                    })
+                    .or_else(|| {
+                        apks.iter()
+                            .copied()
+                            .find(|a| a.name.to_ascii_lowercase().contains("universal"))
+                    })
+                    .or_else(|| apks.first().copied())
+            } else {
+                apks.iter()
+                    .copied()
+                    .find(|a| a.name.to_ascii_lowercase().contains("universal"))
+                    .or_else(|| apks.first().copied())
+            }
+        }
         _ => None,
     }
 }
