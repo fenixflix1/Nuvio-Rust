@@ -15,7 +15,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build clang pkg-config libssl-dev
+          sudo apt-get install -y cmake ninja-build clang libclang-dev pkg-config libssl-dev
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -57,6 +57,10 @@ jobs:
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.11902837
+          BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android: --target=aarch64-linux-android24 --sysroot=${{ env.ANDROID_HOME }}/ndk/27.0.11902837/toolchains/llvm/prebuilt/linux-x86_64/sysroot
+          BINDGEN_EXTRA_CLANG_ARGS_armv7_linux_androideabi: --target=armv7a-linux-androideabi24 --sysroot=${{ env.ANDROID_HOME }}/ndk/27.0.11902837/toolchains/llvm/prebuilt/linux-x86_64/sysroot
+          BINDGEN_EXTRA_CLANG_ARGS_i686_linux_android: --target=i686-linux-android24 --sysroot=${{ env.ANDROID_HOME }}/ndk/27.0.11902837/toolchains/llvm/prebuilt/linux-x86_64/sysroot
+          BINDGEN_EXTRA_CLANG_ARGS_x86_64_linux_android: --target=x86_64-linux-android24 --sysroot=${{ env.ANDROID_HOME }}/ndk/27.0.11902837/toolchains/llvm/prebuilt/linux-x86_64/sysroot
         run: |
           cargo tauri android build --apk
           mkdir -p ../../dist-apk/raw
@@ -70,6 +74,7 @@ jobs:
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.11902837
+          BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android: --target=aarch64-linux-android24 --sysroot=${{ env.ANDROID_HOME }}/ndk/27.0.11902837/toolchains/llvm/prebuilt/linux-x86_64/sysroot
         run: |
           cargo tauri android build --apk --target aarch64
           RAW_ARM64=$(find gen/android/app/build/outputs/apk -name "*.apk" | head -n 1)
