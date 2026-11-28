@@ -4,7 +4,9 @@ use crate::player_overlay_linux::{
 };
 use crate::skip::SkipChapter;
 use libloading::{Library, Symbol};
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use raw_window_handle::HasWindowHandle;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use raw_window_handle::RawWindowHandle;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
@@ -922,6 +924,9 @@ impl EmbeddedPlayer {
                 rect.w,
                 rect.h,
             )?,
+            #[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
+            _ => platform_host::ChildSurface::create(0, 0, 0, 0, 0)?,
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             other => {
                 return Err(format!(
                     "Window handle {:?} is not X11/Win32 (set GDK_BACKEND=x11 on Wayland)",

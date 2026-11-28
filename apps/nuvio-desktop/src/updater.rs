@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use std::path::PathBuf;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use std::process::Command;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};

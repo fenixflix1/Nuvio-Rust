@@ -31,8 +31,12 @@ use nuvio_core::supabase::{
     SupabaseConfig, SupabaseSession, SyncedAddonRow, SyncedWatchedItem, WatchProgressSyncEntry,
     discover_nuvio_server,
 };
-use player::{EmbeddedPlayer, PlayerUiEventPayload, SubtitleStylePayload, ViewportRect};
-use player_assets::{SubtitleCueItem, export_player_ui_assets, parse_subtitle_cues};
+#[cfg(not(target_os = "android"))]
+use player::ViewportRect;
+use player::{EmbeddedPlayer, PlayerUiEventPayload, SubtitleStylePayload};
+#[cfg(not(target_os = "android"))]
+use player_assets::export_player_ui_assets;
+use player_assets::{SubtitleCueItem, parse_subtitle_cues};
 use plugins_repo::{PluginsState, load_plugins_state, save_plugins_state};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -1438,14 +1442,16 @@ fn get_diagnostics(state: State<'_, AppState>) -> DiagnosticsResponse {
         engine_backend_version = lib.protocol_backend_version().ok();
     }
 
-    let mpv_bin = resolve_mpv_binary(&load_settings_inner(&state.kv).mpv_path);
     #[cfg(target_os = "android")]
     let mpv_available = false;
     #[cfg(not(target_os = "android"))]
-    let mpv_available = Command::new(&mpv_bin)
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success());
+    let mpv_available = {
+        let mpv_bin = resolve_mpv_binary(&load_settings_inner(&state.kv).mpv_path);
+        Command::new(&mpv_bin)
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
 
     DiagnosticsResponse {
         os: std::env::consts::OS,
@@ -2597,12 +2603,20 @@ async fn player_stop(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 fn window_toggle_fullscreen(app: AppHandle, window: WebviewWindow) -> Result<bool, String> {
-    let target = app.get_webview_window("main").unwrap_or(window);
-    let current = target.is_fullscreen().map_err(|e| e.to_string())?;
-    target
-        .set_fullscreen(!current)
-        .map_err(|e| e.to_string())?;
-    Ok(!current)
+    #[cfg(target_os = "android")]
+    {
+        let _ = (app, window);
+        Ok(false)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let target = app.get_webview_window("main").unwrap_or(window);
+        let current = target.is_fullscreen().map_err(|e| e.to_string())?;
+        target
+            .set_fullscreen(!current)
+            .map_err(|e| e.to_string())?;
+        Ok(!current)
+    }
 }
 
 fn launch_mpv_external(
